@@ -12,9 +12,9 @@ Test certificates (tests/certs/):
   server.key — server private key
 """
 
-from testing import assert_equal, assert_true, assert_false, TestSuite
+from std.testing import assert_equal, assert_true, assert_false, TestSuite
 from ffi import OwnedDLHandle, c_int, external_call
-from memory import UnsafePointer, stack_allocation
+from std.memory import UnsafePointer, stack_allocation
 from flare.tls import (
     TlsConfig,
     TlsVerify,

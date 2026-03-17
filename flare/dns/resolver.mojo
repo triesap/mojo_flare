@@ -13,8 +13,8 @@ Memory safety contract:
 """
 
 from ffi import c_int, c_uint, c_char, get_errno, external_call
-from memory import stack_allocation
-from sys.info import CompilationTarget, platform_map
+from std.memory import stack_allocation
+from std.sys.info import CompilationTarget, platform_map
 
 from ..net._libc import (
     AF_INET,

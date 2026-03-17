@@ -12,7 +12,7 @@ Platform notes:
 """
 
 from ffi import c_int, c_uint, c_size_t, c_ssize_t, get_errno, ErrNo
-from memory import stack_allocation
+from std.memory import stack_allocation
 
 from format import Writable, Writer
 from ..net import (

@@ -26,8 +26,8 @@ from ffi import (
     get_errno,
     ErrNo,
 )
-from memory import UnsafePointer, stack_allocation
-from sys.info import CompilationTarget, platform_map
+from std.memory import UnsafePointer, stack_allocation
+from std.sys.info import CompilationTarget, platform_map
 
 # ── platform_map shorthand ────────────────────────────────────────────────────
 comptime _pm = platform_map[T=Int, ...]

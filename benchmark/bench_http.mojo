@@ -12,7 +12,7 @@ Usage:
     pixi run bench-http
 """
 
-from benchmark import (
+from std.benchmark import (
     Bench,
     BenchConfig,
     Bencher,

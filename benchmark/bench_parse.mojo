@@ -17,7 +17,7 @@ The parse benchmarks confirm the overhead is in the FFI boundary + string
 construction, not in CPU-bound scanning.
 """
 
-from benchmark import (
+from std.benchmark import (
     Bench,
     BenchConfig,
     Bencher,

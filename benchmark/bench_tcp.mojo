@@ -6,7 +6,7 @@ Usage:
     pixi run mojo run benchmark/bench_tcp.mojo
 """
 
-from benchmark import run, keep
+from std.benchmark import run, keep
 from flare.net import SocketAddr
 from flare.tcp import TcpStream, TcpListener
 

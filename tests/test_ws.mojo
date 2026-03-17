@@ -12,7 +12,7 @@ Integration tests (test_ws_connect_*) connect to a real echo server.
 They skip gracefully if the network is unavailable.
 """
 
-from testing import (
+from std.testing import (
     assert_equal,
     assert_true,
     assert_false,

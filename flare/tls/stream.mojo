@@ -27,9 +27,9 @@ Example:
     ```
 """
 
-from sys import stderr
+from std.sys import stderr
 from ffi import OwnedDLHandle, c_int
-from memory import UnsafePointer, stack_allocation
+from std.memory import UnsafePointer, stack_allocation
 from ..dns import resolve_v4
 from ..net import SocketAddr, NetworkError, _find_flare_lib
 from ..tcp import TcpStream

@@ -10,7 +10,7 @@ Run:
     pixi run example-tcp
 """
 
-from testing import assert_equal
+from std.testing import assert_equal
 from flare.tcp import TcpStream, TcpListener
 from flare.net import SocketAddr
 

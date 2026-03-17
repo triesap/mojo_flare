@@ -9,7 +9,7 @@ When ``ca_bundle`` is empty, the TLS implementation reads
 OpenSSL's compiled-in system default (``SSL_CTX_set_default_verify_paths``).
 """
 
-from os import getenv
+from std.os import getenv
 
 
 fn _default_ca_bundle() -> String:

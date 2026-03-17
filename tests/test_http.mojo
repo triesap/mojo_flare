@@ -5,7 +5,7 @@ Integration tests (test_http_get_*) make real network connections to
 They are skipped gracefully if the network is unavailable.
 """
 
-from testing import (
+from std.testing import (
     assert_true,
     assert_false,
     assert_equal,

@@ -4,7 +4,7 @@ All tests use loopback (127.0.0.1) with OS-assigned ports. No external
 network access is required.
 """
 
-from testing import assert_equal, assert_not_equal, assert_raises, TestSuite
+from std.testing import assert_equal, assert_not_equal, assert_raises, TestSuite
 from flare.udp import UdpSocket, DatagramTooLarge
 from flare.net import SocketAddr
 

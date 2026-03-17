@@ -13,9 +13,9 @@ Safety contracts for this module:
 """
 
 from ffi import external_call, OwnedDLHandle, c_int, c_uint, get_errno, ErrNo
-from memory import UnsafePointer, stack_allocation, alloc
-from os import getenv
-from sys.info import CompilationTarget
+from std.memory import UnsafePointer, stack_allocation, alloc
+from std.os import getenv
+from std.sys.info import CompilationTarget
 
 from .address import SocketAddr, IpAddr
 from .error import (

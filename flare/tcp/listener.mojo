@@ -10,7 +10,7 @@ Design rules enforced here:
 """
 
 from ffi import c_int, c_uint, get_errno, ErrNo
-from memory import stack_allocation
+from std.memory import stack_allocation
 
 from ..net import (
     SocketAddr,

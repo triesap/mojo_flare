@@ -9,7 +9,7 @@ Covers:
 - Error propagation: non-existent domain raises DnsError with context
 """
 
-from testing import (
+from std.testing import (
     assert_equal,
     assert_true,
     assert_false,

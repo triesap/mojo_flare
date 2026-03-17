@@ -26,8 +26,8 @@ from ffi import (
     get_errno,
     ErrNo,
 )
-from memory import alloc, stack_allocation
-from sys.info import CompilationTarget
+from std.memory import alloc, stack_allocation
+from std.sys.info import CompilationTarget
 
 from ..net import (
     SocketAddr,

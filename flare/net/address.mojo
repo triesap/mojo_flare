@@ -8,7 +8,7 @@ on both IPv4 and IPv6; formatting uses ``inet_ntop(3)``.
 """
 
 from format import Writable, Writer
-from memory import UnsafePointer, stack_allocation
+from std.memory import UnsafePointer, stack_allocation
 from ffi import external_call, c_int, c_uint, c_char
 
 from ._libc import AF_INET, AF_INET6, _inet_pton

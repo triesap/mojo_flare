@@ -22,7 +22,7 @@ The speedup is significant for payloads ≥ 128 B (amortises SIMD setup cost).
 For tiny frames (< 32 B) the scalar loop is comparable or faster.
 """
 
-from benchmark import (
+from std.benchmark import (
     Bench,
     BenchConfig,
     Bencher,
@@ -31,7 +31,7 @@ from benchmark import (
     BenchMetric,
     keep,
 )
-from memory import UnsafePointer
+from std.memory import UnsafePointer
 
 # ── SIMD width ────────────────────────────────────────────────────────────────
 

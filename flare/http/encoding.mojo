@@ -31,7 +31,7 @@ Public API surface:
 - ``decode_content(data, encoding)`` → ``List[UInt8]``
 """
 
-from os import getenv
+from std.os import getenv
 from ffi import OwnedDLHandle, c_int
 
 

@@ -16,7 +16,7 @@ Tests for higher-level API features:
 - ``BufReader`` + ``Readable`` trait
 """
 
-from testing import assert_true, assert_false, assert_equal, assert_raises
+from std.testing import assert_true, assert_false, assert_equal, assert_raises
 from ffi import external_call
 
 from flare.http import (
