@@ -14,7 +14,7 @@ suitable for quick scripts.  For multiple requests, prefer instantiating
 a shared ``HttpClient``.
 
 ``post`` and ``put`` accept a ``String`` body (sets
-``Content-Type: application/json`` automatically), a ``mojson.Value``
+``Content-Type: application/json`` automatically), a ``json.Value``
 body (serialised with ``dumps`` first), or a ``List[UInt8]`` body (sent
 as raw bytes with no implicit ``Content-Type``).
 
@@ -45,7 +45,7 @@ from .error import HttpError, TooManyRedirects
 from ..tcp import TcpStream
 from ..tls import TlsStream, TlsConfig
 from ..net import NetworkError
-from mojson import dumps, Value as JsonValue
+from json import dumps, Value as JsonValue
 from ..net import SocketAddr
 from ..dns import resolve_v4
 
@@ -301,14 +301,14 @@ struct HttpClient(Movable):
         return self.send(req)
 
     def post(self, url: String, body: JsonValue) raises -> Response:
-        """Perform a POST request with a ``mojson.Value`` body.
+        """Perform a POST request with a ``json.Value`` body.
 
         Serialises ``body`` to JSON with ``dumps`` and sets
         ``Content-Type: application/json`` automatically.
 
         Args:
             url:  The target URL (absolute or relative to ``base_url``).
-            body: A ``mojson.Value`` to serialise and send.
+            body: A ``json.Value`` to serialise and send.
 
         Returns:
             The server's ``Response``.
@@ -365,14 +365,14 @@ struct HttpClient(Movable):
         return self.send(req)
 
     def put(self, url: String, body: JsonValue) raises -> Response:
-        """Perform a PUT request with a ``mojson.Value`` body.
+        """Perform a PUT request with a ``json.Value`` body.
 
         Serialises ``body`` to JSON with ``dumps`` and sets
         ``Content-Type: application/json`` automatically.
 
         Args:
             url:  The target URL (absolute or relative to ``base_url``).
-            body: A ``mojson.Value`` to serialise and send.
+            body: A ``json.Value`` to serialise and send.
 
         Returns:
             The server's ``Response``.
@@ -463,14 +463,14 @@ struct HttpClient(Movable):
         return self.send(req)
 
     def patch(self, url: String, body: JsonValue) raises -> Response:
-        """Perform a PATCH request with a ``mojson.Value`` body.
+        """Perform a PATCH request with a ``json.Value`` body.
 
         Serialises ``body`` to JSON with ``dumps`` and sets
         ``Content-Type: application/json`` automatically.
 
         Args:
             url:  The target URL (absolute or relative to ``base_url``).
-            body: A ``mojson.Value`` to serialise and send.
+            body: A ``json.Value`` to serialise and send.
 
         Returns:
             The server's ``Response``.
@@ -1116,14 +1116,14 @@ def post(url: String, body: String) raises -> Response:
 
 
 def post(url: String, body: JsonValue) raises -> Response:
-    """Perform a one-shot HTTP POST with a ``mojson.Value`` body.
+    """Perform a one-shot HTTP POST with a ``json.Value`` body.
 
     Serialises ``body`` to JSON with ``dumps`` and sets
     ``Content-Type: application/json`` automatically.
 
     Args:
         url:  The target URL.
-        body: A ``mojson.Value`` to serialise and send.
+        body: A ``json.Value`` to serialise and send.
 
     Returns:
         The server's ``Response``.
@@ -1169,14 +1169,14 @@ def put(url: String, body: String) raises -> Response:
 
 
 def put(url: String, body: JsonValue) raises -> Response:
-    """Perform a one-shot HTTP PUT with a ``mojson.Value`` body.
+    """Perform a one-shot HTTP PUT with a ``json.Value`` body.
 
     Serialises ``body`` to JSON with ``dumps`` and sets
     ``Content-Type: application/json`` automatically.
 
     Args:
         url:  The target URL.
-        body: A ``mojson.Value`` to serialise and send.
+        body: A ``json.Value`` to serialise and send.
 
     Returns:
         The server's ``Response``.
@@ -1252,14 +1252,14 @@ def patch(url: String, body: String) raises -> Response:
 
 
 def patch(url: String, body: JsonValue) raises -> Response:
-    """Perform a one-shot HTTP PATCH with a ``mojson.Value`` body.
+    """Perform a one-shot HTTP PATCH with a ``json.Value`` body.
 
     Serialises ``body`` to JSON with ``dumps`` and sets
     ``Content-Type: application/json`` automatically.
 
     Args:
         url:  The target URL.
-        body: A ``mojson.Value`` to serialise and send.
+        body: A ``json.Value`` to serialise and send.
 
     Returns:
         The server's ``Response``.

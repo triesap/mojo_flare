@@ -1,6 +1,6 @@
 """HTTP response type."""
 
-from mojson import loads, Value
+from json import loads, Value
 from .headers import HeaderMap
 from .error import HttpError
 
@@ -109,10 +109,10 @@ struct Response(Movable):
         return out^
 
     def json(self) raises -> Value:
-        """Parse the body as JSON and return a ``mojson.Value``.
+        """Parse the body as JSON and return a ``json.Value``.
 
         Uses the pure-Mojo backend from
-        `mojson <https://github.com/ehsanmok/mojson>`_.
+        `json <https://github.com/ehsanmok/json>`_.
 
         Returns:
             A ``Value`` representing the parsed JSON document.

@@ -35,7 +35,7 @@ from flare.http import (
 - `BasicAuth`           — HTTP Basic authentication (RFC 7617).
 - `BearerAuth`          — HTTP Bearer token authentication (RFC 6750).
 - `get`, `post`, `put`, `delete`, `head` — Module-level one-shot helpers.
-  `post` and `put` accept a `String` (JSON auto-set), `mojson.Value`
+  `post` and `put` accept a `String` (JSON auto-set), `json.Value`
   (auto-serialised), or `List[UInt8]` (raw bytes).
 
 ## Example
@@ -57,7 +57,7 @@ def main() raises:
         r.raise_for_status()
         print(r.text())
 
-    # Parse JSON response body (returns mojson.Value)
+    # Parse JSON response body (returns json.Value)
     var data = HttpClient().get("https://httpbin.org/json").json()
     print(data["slideshow"]["title"].string_value())
 ```

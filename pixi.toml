@@ -25,7 +25,7 @@ mojo             = "<1.0.0"
 openssl          = ">=3.6.1,<4"    # TLS: libssl + libcrypto (SHA-1 for WS handshake)
 ca-certificates  = ">=2025.1.31"   # TLS default CA bundle → $CONDA_PREFIX/ssl/cacert.pem
 zlib             = ">=1.3.1,<2"    # HTTP: Content-Encoding gzip/deflate decompression
-mojson           = { git = "https://github.com/ehsanmok/mojson.git", branch = "main" }
+json             = { git = "https://github.com/ehsanmok/json.git", branch = "main" }
 
 [feature.dev.dependencies]
 gxx        = ">=13"           # g++ for Linux (macOS uses system clang++ from Xcode CLT)
@@ -58,7 +58,7 @@ dev     = { features = ["dev"], solve-group = "default" }
 fuzz    = { features = ["dev", "fuzz"], solve-group = "default" }
 
 [tasks]
-# ── Tests (mojson-style flat files) ───────────────────────────────────────────
+# ── Tests (flat files, one file per test suite) ───────────────────────────────
 # Each task runs a single test file; use 'pixi run tests' to run all.
 test-net         = "mojo -I . tests/test_net.mojo"          # Phase 1 — 57 tests
 test-dns         = "mojo -I . tests/test_dns.mojo"          # Phase 2 — 17 tests
@@ -71,7 +71,7 @@ test-ergonomics  = "mojo -I . tests/test_ergonomics.mojo"   # Phase 8 — ergono
 
 tests = { cmd = "mojo -I . tests/test_net.mojo && mojo -I . tests/test_dns.mojo && mojo -I . tests/test_tcp.mojo && mojo -I . tests/test_udp.mojo && mojo -I . tests/test_tls.mojo && mojo -I . tests/test_http.mojo && mojo -I . tests/test_ws.mojo && mojo -I . tests/test_ergonomics.mojo && mojo -I . examples/01_addresses.mojo && mojo -I . examples/02_dns_resolution.mojo && mojo -I . examples/03_error_handling.mojo && mojo -I . examples/04_tcp_echo.mojo && mojo -I . examples/05_http_get.mojo && mojo -I . examples/06_websocket_echo.mojo && mojo -I . examples/07_ergonomics.mojo && mojo -I . examples/08_http_server.mojo && mojo -I . examples/09_ws_server.mojo && mojo -I . examples/10_encoding.mojo" }
 
-# ── Examples (mojson-style: runnable + tested as part of 'pixi run tests') ────
+# ── Examples (runnable + tested as part of 'pixi run tests') ─────────────────
 example-addresses   = "mojo -I . examples/01_addresses.mojo"
 example-dns         = "mojo -I . examples/02_dns_resolution.mojo"
 example-errors      = "mojo -I . examples/03_error_handling.mojo"

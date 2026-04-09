@@ -58,7 +58,7 @@ fn main() raises:
     # String body → Content-Type: application/json automatically
     var r = post("https://httpbin.org/post", '{"hello": "flare"}')
     r.raise_for_status()                   # raises HttpError on non-2xx
-    var data = r.json()                    # mojson.Value
+    var data = r.json()                    # json.Value
     print(data["json"]["hello"].string_value())
 ```
 
@@ -83,7 +83,7 @@ fn main() raises:
 
     # Base URL + Bearer token, both positional
     with HttpClient("https://api.example.com", BearerAuth("tok_abc123")) as c:
-        var items = c.get("/items").json()  # mojson.Value
+        var items = c.get("/items").json()  # json.Value
         c.post("/items", '{"name": "new"}').raise_for_status()
 ```
 
@@ -230,7 +230,7 @@ fn main() raises:
 
 ```mojo
 from flare.http import HttpClient, Status, Url
-from mojson import Value
+from json import Value
 
 fn main() raises:
     var client = HttpClient()
@@ -240,7 +240,7 @@ fn main() raises:
         print(resp.text()[:80])               # raw UTF-8 body
     var ct = resp.headers.get("content-type") # case-insensitive lookup
 
-    # Parse JSON body (returns mojson.Value)
+    # Parse JSON body (returns json.Value)
     var json_resp = client.get("https://httpbin.org/json")
     var data: Value = json_resp.json()
     print(data["slideshow"]["title"].string_value())

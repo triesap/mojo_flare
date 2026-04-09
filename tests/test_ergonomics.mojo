@@ -4,10 +4,10 @@ Tests for higher-level API features:
 - ``Auth`` trait + ``BasicAuth`` + ``BearerAuth``
 - ``HttpError`` + ``TooManyRedirects``
 - ``Response.raise_for_status()`` + ``Response.iter_bytes()`` + ``Response.json()``
-  (returns ``mojson.Value``)
+  (returns ``json.Value``)
 - ``HttpClient`` constructors: ``HttpClient()``, ``HttpClient("base_url")``,
   ``HttpClient(auth)``, ``HttpClient("base_url", auth)``
-- ``post`` / ``put`` with ``String`` body (JSON auto-set), ``mojson.Value``
+- ``post`` / ``put`` with ``String`` body (JSON auto-set), ``json.Value``
   body (auto-serialised), and ``List[UInt8]`` body (raw bytes)
 - Module-level ``get``, ``post``, ``put``, ``delete``, ``head`` helpers
 - ``TcpStream.connect(host, port)`` + ``TcpStream.connect(host, port, timeout_ms)``
@@ -192,9 +192,7 @@ def test_response_raise_for_status_301() raises:
 
 
 def test_response_json_parses_value() raises:
-    """``Response.json()`` parses the body as a ``mojson.Value``."""
-    from mojson import Value
-
+    """``Response.json()`` parses the body as a ``json.Value``."""
     var body = List[UInt8]()
     for b in String('{"x": 1}').as_bytes():
         body.append(b)

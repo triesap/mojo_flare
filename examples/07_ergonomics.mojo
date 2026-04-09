@@ -6,10 +6,10 @@ Demonstrates the high-level, requests-style interface:
   ───────────────
   - Module-level one-shot helpers: get(), post(), put(), patch(), delete(), head()
   - String body → Content-Type: application/json set automatically
-  - mojson.Value body → auto-serialised to JSON
+  - json.Value body → auto-serialised to JSON
   - HttpClient("https://api.example.com", BearerAuth("tok")) — base URL + auth
   - raise_for_status() to turn non-2xx into HttpError
-  - Response.json() returning a mojson.Value
+  - Response.json() returning a json.Value
   - iter_bytes() for streaming response bodies
 
   Authentication
