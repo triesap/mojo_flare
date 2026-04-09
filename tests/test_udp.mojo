@@ -20,7 +20,7 @@ def zero_buf(n: Int) -> List[UInt8]:
 
 def str_bytes(s: String) -> List[UInt8]:
     var out = List[UInt8]()
-    for i in range(len(s)):
+    for i in range(s.byte_length()):
         out.append(s.as_bytes()[i])
     return out^
 

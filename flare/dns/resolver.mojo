@@ -58,7 +58,7 @@ def resolve(host: String) raises -> List[IpAddr]:
             print(a[])
         ```
     """
-    if len(host) == 0:
+    if host.byte_length() == 0:
         raise AddressParseError("empty hostname")
 
     # Security: validate hostname before passing to getaddrinfo(3).

@@ -39,7 +39,7 @@ def _sha1_srv(data: String) raises -> List[UInt8]:
         NetworkError: If the SHA-1 function cannot be loaded.
     """
     var lib = OwnedDLHandle(_find_flare_lib())
-    var fn_sha1 = lib.get_function[def(Int, Int, Int) -> Int]("SHA1")
+    var fn_sha1 = lib.get_function[def(Int, Int, Int) abi("C") -> Int]("SHA1")
     var digest = List[UInt8](capacity=_SHA1_LEN)
     digest.resize(_SHA1_LEN, 0)
     var data_bytes = data.as_bytes()

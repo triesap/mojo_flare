@@ -76,7 +76,7 @@ def _c_err(lib: OwnedDLHandle) -> String:
         Human-readable error string (empty if no error).
     """
     var fn_err = lib.get_function[
-        def() -> UnsafePointer[UInt8, MutExternalOrigin]
+        def() abi("C") -> UnsafePointer[UInt8, MutExternalOrigin]
     ]("flare_ssl_last_error")
     var p = fn_err()
     return String(StringSlice(unsafe_from_utf8_ptr=p))
@@ -169,15 +169,15 @@ struct TlsStream(Movable, Readable):
         if self._ssl != 0:
             try:
                 var lib = OwnedDLHandle(_find_flare_lib())
-                var fn_shutdown = lib.get_function[def(Int) -> c_int](
+                var fn_shutdown = lib.get_function[def(Int) abi("C") -> c_int](
                     "flare_ssl_shutdown"
                 )
                 _ = fn_shutdown(self._ssl)
-                var fn_ssl_free = lib.get_function[def(Int) -> None](
+                var fn_ssl_free = lib.get_function[def(Int) abi("C") -> None](
                     "flare_ssl_free"
                 )
                 fn_ssl_free(self._ssl)
-                var fn_ctx_free = lib.get_function[def(Int) -> None](
+                var fn_ctx_free = lib.get_function[def(Int) abi("C") -> None](
                     "flare_ssl_ctx_free"
                 )
                 fn_ctx_free(self._ctx)
@@ -246,27 +246,27 @@ struct TlsStream(Movable, Readable):
         var lib = OwnedDLHandle(_find_flare_lib())
 
         # Load function pointers (type annotations use Int for void* handles)
-        var fn_ctx_new = lib.get_function[def() -> Int]("flare_ssl_ctx_new")
-        var fn_ctx_free = lib.get_function[def(Int) -> None](
+        var fn_ctx_new = lib.get_function[def() abi("C") -> Int]("flare_ssl_ctx_new")
+        var fn_ctx_free = lib.get_function[def(Int) abi("C") -> None](
             "flare_ssl_ctx_free"
         )
-        var fn_set_security = lib.get_function[def(Int) -> c_int](
+        var fn_set_security = lib.get_function[def(Int) abi("C") -> c_int](
             "flare_ssl_ctx_set_security_policy"
         )
-        var fn_set_verify = lib.get_function[def(Int, c_int) -> c_int](
+        var fn_set_verify = lib.get_function[def(Int, c_int) abi("C") -> c_int](
             "flare_ssl_ctx_set_verify_peer"
         )
-        var fn_load_ca = lib.get_function[def(Int, Int) -> c_int](
+        var fn_load_ca = lib.get_function[def(Int, Int) abi("C") -> c_int](
             "flare_ssl_ctx_load_ca_bundle"
         )
-        var fn_load_cert_key = lib.get_function[def(Int, Int, Int) -> c_int](
+        var fn_load_cert_key = lib.get_function[def(Int, Int, Int) abi("C") -> c_int](
             "flare_ssl_ctx_load_cert_key"
         )
-        var fn_ssl_new = lib.get_function[def(Int, c_int) -> Int](
+        var fn_ssl_new = lib.get_function[def(Int, c_int) abi("C") -> Int](
             "flare_ssl_new"
         )
-        var fn_ssl_free = lib.get_function[def(Int) -> None]("flare_ssl_free")
-        var fn_ssl_connect = lib.get_function[def(Int, Int) -> c_int](
+        var fn_ssl_free = lib.get_function[def(Int) abi("C") -> None]("flare_ssl_free")
+        var fn_ssl_connect = lib.get_function[def(Int, Int) abi("C") -> c_int](
             "flare_ssl_connect"
         )
 
@@ -364,24 +364,24 @@ struct TlsStream(Movable, Readable):
         )
 
         var lib = OwnedDLHandle(_find_flare_lib())
-        var fn_ctx_new = lib.get_function[def() -> Int]("flare_ssl_ctx_new")
-        var fn_ctx_free = lib.get_function[def(Int) -> None](
+        var fn_ctx_new = lib.get_function[def() abi("C") -> Int]("flare_ssl_ctx_new")
+        var fn_ctx_free = lib.get_function[def(Int) abi("C") -> None](
             "flare_ssl_ctx_free"
         )
-        var fn_set_security = lib.get_function[def(Int) -> c_int](
+        var fn_set_security = lib.get_function[def(Int) abi("C") -> c_int](
             "flare_ssl_ctx_set_security_policy"
         )
-        var fn_set_verify = lib.get_function[def(Int, c_int) -> c_int](
+        var fn_set_verify = lib.get_function[def(Int, c_int) abi("C") -> c_int](
             "flare_ssl_ctx_set_verify_peer"
         )
-        var fn_load_ca = lib.get_function[def(Int, Int) -> c_int](
+        var fn_load_ca = lib.get_function[def(Int, Int) abi("C") -> c_int](
             "flare_ssl_ctx_load_ca_bundle"
         )
-        var fn_ssl_new = lib.get_function[def(Int, c_int) -> Int](
+        var fn_ssl_new = lib.get_function[def(Int, c_int) abi("C") -> Int](
             "flare_ssl_new"
         )
-        var fn_ssl_free = lib.get_function[def(Int) -> None]("flare_ssl_free")
-        var fn_ssl_connect = lib.get_function[def(Int, Int) -> c_int](
+        var fn_ssl_free = lib.get_function[def(Int) abi("C") -> None]("flare_ssl_free")
+        var fn_ssl_connect = lib.get_function[def(Int, Int) abi("C") -> c_int](
             "flare_ssl_connect"
         )
 
@@ -433,7 +433,7 @@ struct TlsStream(Movable, Readable):
             NetworkError: On I/O or decryption error.
         """
         var lib = OwnedDLHandle(_find_flare_lib())
-        var fn_read = lib.get_function[def(Int, Int, c_int) -> c_int](
+        var fn_read = lib.get_function[def(Int, Int, c_int) abi("C") -> c_int](
             "flare_ssl_read"
         )
         var n = fn_read(self._ssl, Int(buf), c_int(size))
@@ -471,7 +471,7 @@ struct TlsStream(Movable, Readable):
             NetworkError: On I/O or encryption error.
         """
         var lib = OwnedDLHandle(_find_flare_lib())
-        var fn_write = lib.get_function[def(Int, Int, c_int) -> c_int](
+        var fn_write = lib.get_function[def(Int, Int, c_int) abi("C") -> c_int](
             "flare_ssl_write"
         )
         var n = fn_write(self._ssl, Int(data.unsafe_ptr()), c_int(len(data)))
@@ -509,7 +509,7 @@ struct TlsStream(Movable, Readable):
         try:
             var lib = OwnedDLHandle(_find_flare_lib())
             var fn_ver = lib.get_function[
-                def(Int) -> UnsafePointer[UInt8, MutExternalOrigin]
+                def(Int) abi("C") -> UnsafePointer[UInt8, MutExternalOrigin]
             ]("flare_ssl_get_version")
             var p = fn_ver(self._ssl)
             return String(StringSlice(unsafe_from_utf8_ptr=p))
@@ -525,7 +525,7 @@ struct TlsStream(Movable, Readable):
         try:
             var lib = OwnedDLHandle(_find_flare_lib())
             var fn_cipher = lib.get_function[
-                def(Int) -> UnsafePointer[UInt8, MutExternalOrigin]
+                def(Int) abi("C") -> UnsafePointer[UInt8, MutExternalOrigin]
             ]("flare_ssl_get_cipher")
             var p = fn_cipher(self._ssl)
             return String(StringSlice(unsafe_from_utf8_ptr=p))
@@ -545,7 +545,7 @@ struct TlsStream(Movable, Readable):
             NetworkError: If no peer certificate is available.
         """
         var lib = OwnedDLHandle(_find_flare_lib())
-        var fn_subj = lib.get_function[def(Int, Int, c_int) -> c_int](
+        var fn_subj = lib.get_function[def(Int, Int, c_int) abi("C") -> c_int](
             "flare_ssl_get_peer_cert_subject"
         )
         # Safety: buf is stack-allocated; fn_subj writes at most _CERT_SUBJ_LEN
@@ -568,15 +568,15 @@ struct TlsStream(Movable, Readable):
         if self._ssl != 0:
             try:
                 var lib = OwnedDLHandle(_find_flare_lib())
-                var fn_shutdown = lib.get_function[def(Int) -> c_int](
+                var fn_shutdown = lib.get_function[def(Int) abi("C") -> c_int](
                     "flare_ssl_shutdown"
                 )
                 _ = fn_shutdown(self._ssl)
-                var fn_ssl_free = lib.get_function[def(Int) -> None](
+                var fn_ssl_free = lib.get_function[def(Int) abi("C") -> None](
                     "flare_ssl_free"
                 )
                 fn_ssl_free(self._ssl)
-                var fn_ctx_free = lib.get_function[def(Int) -> None](
+                var fn_ctx_free = lib.get_function[def(Int) abi("C") -> None](
                     "flare_ssl_ctx_free"
                 )
                 fn_ctx_free(self._ctx)
