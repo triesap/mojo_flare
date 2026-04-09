@@ -5,6 +5,7 @@
 # Mojo build artifacts
 __pycache__/
 *.pyc
+*.mojopkg
 .mojo_cache/
 .mogg_cache/
 
