@@ -45,6 +45,7 @@ from ._libc import (
     SO_KEEPALIVE,
     SO_RCVTIMEO,
     SO_SNDTIMEO,
+    SO_NOSIGPIPE,
     TCP_NODELAY,
     IPPROTO_TCP,
     F_GETFL,
@@ -147,6 +148,19 @@ struct RawSocket(Movable):
         self.fd = fd
         self.family = family
         self.kind = kind
+        # On macOS, suppress SIGPIPE delivery when writing to a broken
+        # connection. Linux uses MSG_NOSIGNAL on send(); macOS requires
+        # SO_NOSIGPIPE at the socket level (MSG_NOSIGNAL = 0 there).
+        comptime if CompilationTarget.is_macos():
+            var one = stack_allocation[1, c_int]()
+            one.init_pointee_copy(c_int(1))
+            _ = _setsockopt(
+                self.fd,
+                SOL_SOCKET,
+                SO_NOSIGPIPE,
+                one.bitcast[UInt8](),
+                c_uint(4),
+            )
 
     def __init__(out self, fd: c_int, family: c_int, kind: c_int, _wrap: Bool):
         """Wrap an existing file descriptor without calling ``socket(2)``.

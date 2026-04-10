@@ -29,6 +29,14 @@ comptime _SHA1_LEN: Int = 20
 def _sha1_srv(data: String) raises -> List[UInt8]:
     """Compute SHA-1 via the bundled libflare_tls shared library.
 
+    Opens the library, retrieves the ``SHA1`` function pointer, then
+    delegates to ``_do_sha1_srv`` which takes ``lib`` as a ``read``
+    (borrow).  A borrow cannot be ASAP-destroyed, so the library stays
+    mapped for the entire C call.  Without this, Mojo's ASAP policy
+    calls ``dlclose`` right after ``get_function`` — before the pointer
+    is ever invoked — unmapping the library and crashing on macOS ARM64.
+    See MSTDL-2334.
+
     Args:
         data: Input string to hash.
 
@@ -40,9 +48,30 @@ def _sha1_srv(data: String) raises -> List[UInt8]:
     """
     var lib = OwnedDLHandle(_find_flare_lib())
     var fn_sha1 = lib.get_function[def(Int, Int, Int) abi("C") -> Int]("SHA1")
+    return _do_sha1_srv(fn_sha1, data.as_bytes(), lib)
+
+
+def _do_sha1_srv(
+    fn_sha1: def (Int, Int, Int) abi("C") -> Int,
+    data_bytes: Span[UInt8, _],
+    read lib: OwnedDLHandle,
+) -> List[UInt8]:
+    """Invoke the SHA-1 C function with ``lib`` kept alive via borrow.
+
+    ``lib`` is a ``read`` (borrow) parameter: Mojo cannot ASAP-destroy
+    it while this function is executing, ensuring the shared library
+    remains mapped across the FFI call.
+
+    Args:
+        fn_sha1:    Function pointer to ``SHA1`` from libflare_tls.
+        data_bytes: Input bytes to hash.
+        lib:        Borrowed handle to the shared library (keeps it mapped).
+
+    Returns:
+        20-byte SHA-1 digest as ``List[UInt8]``.
+    """
     var digest = List[UInt8](capacity=_SHA1_LEN)
     digest.resize(_SHA1_LEN, 0)
-    var data_bytes = data.as_bytes()
     _ = fn_sha1(
         Int(data_bytes.unsafe_ptr()),
         Int(len(data_bytes)),
@@ -580,5 +609,5 @@ def _handle_ws_connection(
         _send_upgrade_response(stream, accept)
         var conn = WsConnection(stream^, peer)
         handler(conn^)
-    except:
-        pass
+    except e:
+        print("[ws] connection error: " + String(e))

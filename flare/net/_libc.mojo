@@ -81,7 +81,11 @@ comptime TIMEVAL_SIZE: c_uint = 16  # 8 bytes tv_sec + 8 bytes tv_usec on 64-bit
 comptime MSG_NOSIGNAL: c_int = c_int(
     _pm["MSG_NOSIGNAL", linux=0x4000, macos=0]()
 )
-# macOS uses SO_NOSIGPIPE socket option instead; MSG_NOSIGNAL = 0 is safe.
+# macOS: MSG_NOSIGNAL = 0 (not supported). Use SO_NOSIGPIPE socket option to
+# suppress SIGPIPE delivery when writing to a broken connection.
+comptime SO_NOSIGPIPE: c_int = c_int(
+    _pm["SO_NOSIGPIPE", linux=0, macos=0x1022]()
+)
 
 # ── SO_ERROR (for non-blocking connect result check) ──────────────────────────
 comptime SO_ERROR: c_int = c_int(_pm["SO_ERROR", linux=4, macos=0x1007]())
