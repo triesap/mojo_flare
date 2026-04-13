@@ -68,7 +68,7 @@ def _c_str(s: String) -> Int:
 def _tls_err(lib: OwnedDLHandle) -> String:
     """Return the last error from ``flare_ssl_last_error``."""
     var fn_e = lib.get_function[
-        def() abi("C") -> UnsafePointer[UInt8, MutExternalOrigin]
+        def() thin abi("C") -> UnsafePointer[UInt8, MutExternalOrigin]
     ]("flare_ssl_last_error")
     var p = fn_e()
     return String(StringSlice(unsafe_from_utf8_ptr=p))
@@ -96,7 +96,7 @@ struct _TlsTestServer:
             ca:   Path to CA bundle for client cert verification, or ``""``.
         """
         self._lib = OwnedDLHandle(_TLS_LIB)
-        var fn_new = self._lib.get_function[def(Int, Int, Int, c_int) abi("C") -> Int](
+        var fn_new = self._lib.get_function[def(Int, Int, Int, c_int) thin abi("C") -> Int](
             "flare_test_server_new"
         )
         var ca_int = _c_str(ca) if ca != "" else 0
@@ -111,7 +111,7 @@ struct _TlsTestServer:
 
     def __del__(deinit self):
         if self._ptr != 0:
-            var fn_free = self._lib.get_function[def(Int) abi("C") -> None](
+            var fn_free = self._lib.get_function[def(Int) thin abi("C") -> None](
                 "flare_test_server_free"
             )
             fn_free(self._ptr)
@@ -122,7 +122,7 @@ struct _TlsTestServer:
         Returns:
             Port number the server is listening on.
         """
-        var fn_port = self._lib.get_function[def(Int) abi("C") -> c_int](
+        var fn_port = self._lib.get_function[def(Int) thin abi("C") -> c_int](
             "flare_test_server_port"
         )
         return Int(fn_port(self._ptr))
@@ -133,7 +133,7 @@ struct _TlsTestServer:
         Blocks until a client connects, performs TLS handshake, echoes data,
         then returns. Intended to be the only operation in a forked child.
         """
-        var fn_echo = self._lib.get_function[def(Int) abi("C") -> c_int](
+        var fn_echo = self._lib.get_function[def(Int) thin abi("C") -> c_int](
             "flare_test_server_echo_once"
         )
         _ = fn_echo(self._ptr)

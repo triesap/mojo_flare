@@ -202,7 +202,7 @@ struct TcpStream(Movable):
             # macOS/arm64: use C helper to avoid Mojo variadic fcntl ABI bug.
             var lib = OwnedDLHandle(_find_flare_lib())
             var fn_ct = lib.get_function[
-                def(c_int, Int, c_uint, c_int) abi("C") -> c_int
+                def(c_int, Int, c_uint, c_int) thin abi("C") -> c_int
             ]("flare_connect_timeout")
             var rc = fn_ct(sock.fd, Int(sa[0]), sa[1], c_int(timeout_ms))
             sa[0].free()
