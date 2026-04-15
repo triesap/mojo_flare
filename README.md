@@ -1,8 +1,8 @@
-# flare 🔥
+# flare
 
 [![CI](https://github.com/ehsanmok/flare/actions/workflows/ci.yml/badge.svg)](https://github.com/ehsanmok/flare/actions/workflows/ci.yml)
 [![Fuzz](https://github.com/ehsanmok/flare/actions/workflows/fuzz.yml/badge.svg)](https://github.com/ehsanmok/flare/actions/workflows/fuzz.yml)
-[![Docs](https://github.com/ehsanmok/flare/actions/workflows/docs.yaml/badge.svg)](https://github.com/ehsanmok/flare/actions/workflows/docs.yaml)
+[![Docs](https://github.com/ehsanmok/flare/actions/workflows/docs.yaml/badge.svg)](https://ehsanmok.github.io/flare/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 > [!WARNING]
@@ -15,25 +15,6 @@ to HTTP/1.1 and WebSockets, written entirely in Mojo with minimal FFI surface.
 - **Security by default**: TLS 1.2+, injection-safe parsing, DoS limits baked in
 - **Zero unnecessary C deps**: only libc (always present) and OpenSSL for TLS
 - **Layered architecture**: each layer imports only from layers below it
-
-## Requirements
-
-[pixi](https://pixi.sh) package manager (wraps Mojo nightly automatically)
-
-## Installation
-
-Add flare to your project's `pixi.toml`:
-
-```toml
-[workspace]
-channels = ["https://conda.modular.com/max-nightly", "conda-forge"]
-preview = ["pixi-build"]
-
-[dependencies]
-flare = { git = "https://github.com/ehsanmok/flare.git", branch = "main" }
-```
-
----
 
 ## Quick Start: High-Level API
 
@@ -166,9 +147,30 @@ def main() raises:
             break                          # blank line = end of headers
 ```
 
+## Installation
+
+Add flare to your project's `pixi.toml`:
+
+```toml
+[workspace]
+channels = ["https://conda.modular.com/max-nightly", "conda-forge"]
+preview = ["pixi-build"]
+
+[dependencies]
+flare = { git = "https://github.com/ehsanmok/flare.git", branch = "main" }
+```
+
+Then run:
+
+```bash
+pixi install
+```
+
+Requires [pixi](https://pixi.sh) (pulls Mojo nightly automatically).
+
 ---
 
-## Quick Start: Low-Level API
+## Low-Level API
 
 Use the low-level API when you need direct control over socket options,
 custom framing, or protocols beyond HTTP and WebSocket.
@@ -271,7 +273,75 @@ def main() raises:
 
 ---
 
-## Development Setup
+## Layer Architecture
+
+```
+flare.io    ─ BufReader (Readable trait)
+    │
+flare.ws    ─ WebSocket client (RFC 6455)
+flare.http  ─ HTTP/1.1 client + HeaderMap + URL
+    │
+flare.tls   ─ TLS 1.2/1.3 via OpenSSL FFI
+    │
+flare.tcp   ─ TcpStream + TcpListener
+flare.udp   ─ UdpSocket
+    │
+flare.dns   ─ getaddrinfo(3) FFI
+    │
+flare.net   ─ IpAddr, SocketAddr, RawSocket, errors
+```
+
+Each layer imports only from layers below it. No circular dependencies.
+
+## Security Properties
+
+| Layer | Security Guarantee |
+|-------|--------------------|
+| `flare.net` | Null bytes, CRLF, `@` in IP strings raise `AddressParseError` before libc |
+| `flare.dns` | Null/CRLF/`@` injection, >253-char hostnames, >63-char labels all raise |
+| `flare.tls` | TLS ≥ 1.2 only; RC4/NULL/EXPORT/3DES ciphers disabled; SNI always sent |
+| `flare.http` | Header injection prevention (`\r`/`\n` in name/value raises `HeaderInjectionError`) |
+| `flare.http` | DoS limits: max 100 headers, 8 KB values, 64 KB header block, 100 MB body |
+| `flare.ws`  | Client→server frames masked (RFC 6455 §5.3); `Sec-WebSocket-Accept` verified |
+
+## Performance
+
+### WebSocket XOR Masking (Apple M-series, NEON 32-byte SIMD)
+
+RFC 6455 §5.3 requires XOR-masking every client→server byte.
+SIMD provides a **14–35× speedup** for production-sized payloads:
+
+| Payload | Scalar | SIMD-32 | Speedup |
+|---------|--------|---------|---------|
+|  32 B   | 3.2 GB/s | >100 GB/s† | N/A |
+| 128 B   | 2.7 GB/s | >100 GB/s† | N/A |
+|   1 KB  | 3.2 GB/s | 112.6 GB/s | **35×** |
+|  64 KB  | 3.4 GB/s |  47.8 GB/s | **14×** |
+|   1 MB  | 3.4 GB/s |  54.8 GB/s | **16×** |
+
+†Sub-µs calls exceed benchmark timer resolution.
+
+### HTTP Header Processing (Apple M-series)
+
+| Operation | Latency | Throughput |
+|-----------|---------|------------|
+| `HeaderMap` (10 set + 3 get) | 4.5 µs | ~220K ops/s |
+| `Response` construction | 1.3 µs | ~750K ops/s |
+| `Url.parse` (simple) | 0.5 µs | ~2M ops/s |
+| `Url.parse` (https + port) | 0.9 µs | ~1.1M ops/s |
+
+### IP Parsing + DNS
+
+| Operation | Throughput / Latency |
+|-----------|----------------------|
+| `IpAddr.parse` (IPv4) | 0.20 µs/call (5 Mops/s) |
+| `IpAddr.parse` (IPv6) | 0.22 µs/call |
+| `SocketAddr.parse` | 0.22 µs/call |
+| `resolve("localhost")` | 0.17 ms/call (syscall + resolver cache) |
+
+Full API reference: [ehsanmok.github.io/flare](https://ehsanmok.github.io/flare/)
+
+## Development
 
 ```bash
 git clone https://github.com/ehsanmok/flare.git && cd flare
@@ -355,88 +425,6 @@ pixi run prop-auth          # b64 charset, Basic/Bearer header structure
 ```bash
 pixi run format              # format all source files in-place
 pixi run format-check        # check formatting without modifying (CI)
-```
-
-### API Docs
-
-```bash
-pixi run docs                # build + serve at http://localhost:3000/flare/
-pixi run docs-build          # static HTML → target/doc/ (CI / GitHub Pages)
-```
-
-## Layer Architecture
-
-```
-flare.io    ─ BufReader (Readable trait)
-    │
-flare.ws    ─ WebSocket client (RFC 6455)
-flare.http  ─ HTTP/1.1 client + HeaderMap + URL
-    │
-flare.tls   ─ TLS 1.2/1.3 via OpenSSL FFI
-    │
-flare.tcp   ─ TcpStream + TcpListener
-flare.udp   ─ UdpSocket
-    │
-flare.dns   ─ getaddrinfo(3) FFI
-    │
-flare.net   ─ IpAddr, SocketAddr, RawSocket, errors
-```
-
-Each layer imports only from layers below it. No circular dependencies.
-
-## Security Properties
-
-| Layer | Security Guarantee |
-|-------|--------------------|
-| `flare.net` | Null bytes, CRLF, `@` in IP strings raise `AddressParseError` before libc |
-| `flare.dns` | Null/CRLF/`@` injection, >253-char hostnames, >63-char labels all raise |
-| `flare.tls` | TLS ≥ 1.2 only; RC4/NULL/EXPORT/3DES ciphers disabled; SNI always sent |
-| `flare.http` | Header injection prevention (`\r`/`\n` in name/value raises `HeaderInjectionError`) |
-| `flare.http` | DoS limits: max 100 headers, 8 KB values, 64 KB header block, 100 MB body |
-| `flare.ws`  | Client→server frames masked (RFC 6455 §5.3); `Sec-WebSocket-Accept` verified |
-
-## Performance
-
-### WebSocket XOR Masking (Apple M-series, NEON 32-byte SIMD)
-
-RFC 6455 §5.3 requires XOR-masking every client→server byte.
-SIMD provides a **14–35× speedup** for production-sized payloads:
-
-| Payload | Scalar | SIMD-32 | Speedup |
-|---------|--------|---------|---------|
-|  32 B   | 3.2 GB/s | >100 GB/s† | N/A |
-| 128 B   | 2.7 GB/s | >100 GB/s† | N/A |
-|   1 KB  | 3.2 GB/s | 112.6 GB/s | **35×** |
-|  64 KB  | 3.4 GB/s |  47.8 GB/s | **14×** |
-|   1 MB  | 3.4 GB/s |  54.8 GB/s | **16×** |
-
-†Sub-µs calls exceed benchmark timer resolution.
-
-### HTTP Header Processing (Apple M-series)
-
-| Operation | Latency | Throughput |
-|-----------|---------|------------|
-| `HeaderMap` (10 set + 3 get) | 4.5 µs | ~220K ops/s |
-| `Response` construction | 1.3 µs | ~750K ops/s |
-| `Url.parse` (simple) | 0.5 µs | ~2M ops/s |
-| `Url.parse` (https + port) | 0.9 µs | ~1.1M ops/s |
-
-### IP Parsing + DNS
-
-| Operation | Throughput / Latency |
-|-----------|----------------------|
-| `IpAddr.parse` (IPv4) | 0.20 µs/call (5 Mops/s) |
-| `IpAddr.parse` (IPv6) | 0.22 µs/call |
-| `SocketAddr.parse` | 0.22 µs/call |
-| `resolve("localhost")` | 0.17 ms/call (syscall + resolver cache) |
-
-## API Documentation
-
-Generated with [mojodoc](https://github.com/ehsanmok/mojodoc):
-
-```bash
-pixi run docs          # build + serve at http://localhost:3000/flare/
-pixi run docs-build    # static HTML → target/doc/ (CI / GitHub Pages)
 ```
 
 ## License
