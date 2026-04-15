@@ -399,17 +399,17 @@ a pure-Mojo fuzzing library. The `fuzz/` directory contains two kinds of harness
 | **Fuzz harness** (`fuzz_*.mojo`) | Feed arbitrary bytes/strings into a parser; any crash or unexpected panic is a bug. Expected typed errors (e.g. `UrlParseError`, `WsProtocolError`) are not reported. |
 | **Property test** (`prop_*.mojo`) | Assert invariants (round-trips, injection resistance, charset correctness) hold for all generated inputs. |
 
-**Prerequisites** — mozz must be available on the Mojo import path. With the
+**Prerequisites:** mozz must be available on the Mojo import path. With the
 default pixi environment it is installed as a git dependency. For a local
 mozz checkout, export the path first:
 
 **Run fuzz harnesses:**
 
 ```bash
-pixi run fuzz-ws            # WsFrame.decode_one() — arbitrary byte inputs
-pixi run fuzz-url           # Url.parse() — arbitrary string inputs
-pixi run fuzz-headers       # HeaderMap.set()/append() — injection detection
-pixi run fuzz-http-response # _parse_http_response() — full HTTP/1.1 parser
+pixi run fuzz-ws            # WsFrame.decode_one(), arbitrary byte inputs
+pixi run fuzz-url           # Url.parse(), arbitrary string inputs
+pixi run fuzz-headers       # HeaderMap.set()/append(), injection detection
+pixi run fuzz-http-response # _parse_http_response(), full HTTP/1.1 parser
 ```
 
 **Run property tests:**
