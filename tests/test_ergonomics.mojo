@@ -89,7 +89,7 @@ def test_basic_auth_empty_password() raises:
     auth.apply(h)
     var hdr = h.get("Authorization")
     assert_true(hdr.startswith("Basic "), "header must start with 'Basic '")
-    assert_true(len(hdr) > 6, "encoded value must be non-empty")
+    assert_true(hdr.byte_length() > 6, "encoded value must be non-empty")
 
 
 def test_bearer_auth_apply() raises:

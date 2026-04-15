@@ -405,7 +405,7 @@ def test_http_server_post_body_loopback() raises:
         "POST /data HTTP/1.1\r\n"
         + "Host: localhost\r\n"
         + "Content-Length: "
-        + String(len(body_str))
+        + String(body_str.byte_length())
         + "\r\n"
         + "Content-Type: application/json\r\n"
         + "\r\n"
@@ -420,7 +420,7 @@ def test_http_server_post_body_loopback() raises:
     var req = _parse_http_request(server_stream, 8192, 1024 * 1024)
     assert_equal(req.method, "POST")
     assert_equal(req.url, "/data")
-    assert_equal(len(req.body), len(body_str))
+    assert_equal(len(req.body), body_str.byte_length())
     server_stream.close()
     srv.close()
 

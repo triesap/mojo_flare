@@ -242,8 +242,8 @@ def _read_line_tcp(
 
 def _str_find_local(s: String, sub: String) -> Int:
     """Return the index of the first ``sub`` in ``s``, or -1."""
-    var n = len(s)
-    var m = len(sub)
+    var n = s.byte_length()
+    var m = sub.byte_length()
     if m == 0:
         return 0
     for i in range(n - m + 1):
@@ -259,8 +259,8 @@ def _str_find_local(s: String, sub: String) -> Int:
 
 def _lower_local(s: String) -> String:
     """Return ASCII-lowercase copy of ``s``."""
-    var out = String(capacity=len(s))
-    for i in range(len(s)):
+    var out = String(capacity=s.byte_length())
+    for i in range(s.byte_length()):
         var c = s.unsafe_ptr()[i]
         if c >= 65 and c <= 90:
             out += chr(Int(c) + 32)
@@ -537,7 +537,7 @@ struct WsClient(Movable):
             var accept_header = String("")
             while True:
                 var line = _read_line_tls(tls, scratch)
-                if len(line) == 0:
+                if line.byte_length() == 0:
                     break
                 var colon = _str_find_local(line, ":")
                 if colon >= 0:
@@ -587,7 +587,7 @@ struct WsClient(Movable):
             var accept_header = String("")
             while True:
                 var line = _read_line_tcp(tcp, scratch)
-                if len(line) == 0:
+                if line.byte_length() == 0:
                     break
                 var colon = _str_find_local(line, ":")
                 if colon >= 0:

@@ -57,9 +57,9 @@ struct HttpError(Copyable, Movable, Writable):
             writer: Destination writer.
         """
         writer.write("HttpError: ", self.status)
-        if len(self.reason) > 0:
+        if self.reason.byte_length() > 0:
             writer.write(" ", self.reason)
-        if len(self.url) > 0:
+        if self.url.byte_length() > 0:
             writer.write(" (", self.url, ")")
 
 

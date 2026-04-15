@@ -209,7 +209,7 @@ struct WsFrame(Movable, Writable):
         Returns:
             A ``WsFrame`` with opcode ``CLOSE``.
         """
-        var payload = List[UInt8](capacity=2 + len(reason))
+        var payload = List[UInt8](capacity=2 + reason.byte_length())
         payload.append(UInt8(code >> 8))
         payload.append(UInt8(code & 0xFF))
         for b in reason.as_bytes():

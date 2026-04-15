@@ -218,8 +218,8 @@ struct Url(Movable):
 @always_inline
 def _find(s: String, sub: String) -> Int:
     """Return the index of the first occurrence of ``sub`` in ``s``, or -1."""
-    var n = len(s)
-    var m = len(sub)
+    var n = s.byte_length()
+    var m = sub.byte_length()
     if m == 0:
         return 0
     if m > n:
@@ -238,8 +238,8 @@ def _find(s: String, sub: String) -> Int:
 @always_inline
 def _rfind(s: String, sub: String) -> Int:
     """Return the index of the last occurrence of ``sub`` in ``s``, or -1."""
-    var n = len(s)
-    var m = len(sub)
+    var n = s.byte_length()
+    var m = sub.byte_length()
     if m == 0:
         return n
     if m > n:
@@ -276,14 +276,14 @@ def _parse_port(s: String, raw: String) raises -> Int:
     Raises:
         UrlParseError: If ``s`` is empty, non-numeric, or out of range.
     """
-    if len(s) == 0:
+    if s.byte_length() == 0:
         raise UrlParseError("empty port in URL: " + raw)
     # Port 1–65535 has at most 5 digits.  Reject longer strings to prevent
     # integer overflow in the accumulation loop below.
-    if len(s) > 5:
+    if s.byte_length() > 5:
         raise UrlParseError("port too long in URL: " + raw)
     var result = 0
-    for i in range(len(s)):
+    for i in range(s.byte_length()):
         var c = Int(s.unsafe_ptr()[i])
         if c < 48 or c > 57:  # '0'..'9'
             raise UrlParseError("invalid port '" + s + "' in URL: " + raw)

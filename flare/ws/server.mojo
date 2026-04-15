@@ -167,8 +167,8 @@ def _read_line_srv(mut stream: TcpStream) raises -> String:
 
 def _lower_srv(s: String) -> String:
     """Return ASCII-lowercase of ``s``."""
-    var out = String(capacity=len(s))
-    for i in range(len(s)):
+    var out = String(capacity=s.byte_length())
+    for i in range(s.byte_length()):
         var c = s.unsafe_ptr()[i]
         if c >= 65 and c <= 90:
             out += chr(Int(c) + 32)
@@ -179,8 +179,8 @@ def _lower_srv(s: String) -> String:
 
 def _str_find_srv(s: String, sub: String) -> Int:
     """Return the index of the first ``sub`` in ``s``, or -1."""
-    var n = len(s)
-    var m = len(sub)
+    var n = s.byte_length()
+    var m = sub.byte_length()
     if m == 0:
         return 0
     for i in range(n - m + 1):
@@ -233,7 +233,7 @@ def _parse_ws_upgrade_bytes(data: Span[UInt8, _]) raises -> String:
 
     while True:
         var line = read_line(data, pos)
-        if len(line) == 0:
+        if line.byte_length() == 0:
             break
         var colon = _str_find_srv(line, ":")
         if colon < 0:
@@ -260,7 +260,7 @@ def _parse_ws_upgrade_bytes(data: Span[UInt8, _]) raises -> String:
             "WebSocket upgrade request missing Upgrade: websocket or"
             " Connection: Upgrade headers"
         )
-    if len(ws_key) == 0:
+    if ws_key.byte_length() == 0:
         raise NetworkError(
             "WebSocket upgrade request missing Sec-WebSocket-Key"
         )
@@ -290,7 +290,7 @@ def _read_upgrade_request(mut stream: TcpStream) raises -> String:
 
     while True:
         var line = _read_line_srv(stream)
-        if len(line) == 0:
+        if line.byte_length() == 0:
             break
         var colon = _str_find_srv(line, ":")
         if colon < 0:
@@ -317,7 +317,7 @@ def _read_upgrade_request(mut stream: TcpStream) raises -> String:
             "WebSocket upgrade request missing Upgrade: websocket or"
             " Connection: Upgrade headers"
         )
-    if len(ws_key) == 0:
+    if ws_key.byte_length() == 0:
         raise NetworkError(
             "WebSocket upgrade request missing Sec-WebSocket-Key"
         )

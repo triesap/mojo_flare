@@ -121,7 +121,7 @@ def _handle_connection(
             _write_response(stream, resp)
         except e:
             var msg500 = "500 Internal Server Error: " + String(e)
-            var body500 = List[UInt8](capacity=len(msg500))
+            var body500 = List[UInt8](capacity=msg500.byte_length())
             for b in msg500.as_bytes():
                 body500.append(b)
             var resp500 = Response(
@@ -136,7 +136,7 @@ def _handle_connection(
                 pass
     except e:
         var msg400 = "400 Bad Request: " + String(e)
-        var body400 = List[UInt8](capacity=len(msg400))
+        var body400 = List[UInt8](capacity=msg400.byte_length())
         for b in msg400.as_bytes():
             body400.append(b)
         var resp400 = Response(
@@ -189,7 +189,7 @@ def _parse_int_str(s: String) -> Int:
     """Parse a non-negative decimal integer string; returns 0 on failure."""
     var result = 0
     var trimmed = s.strip()
-    for i in range(len(trimmed)):
+    for i in range(trimmed.byte_length()):
         var c = Int(trimmed.unsafe_ptr()[i])
         if c < 48 or c > 57:
             break
@@ -245,11 +245,11 @@ def _parse_http_request_bytes(
 
     # ── 1. Request line ───────────────────────────────────────────────────────
     var req_line = _read_line_buf(data, pos)
-    if len(req_line) == 0:
+    if req_line.byte_length() == 0:
         raise Error("empty request line")
 
     var sp1 = -1
-    for i in range(len(req_line)):
+    for i in range(req_line.byte_length()):
         if req_line.unsafe_ptr()[i] == 32:
             sp1 = i
             break
@@ -258,7 +258,7 @@ def _parse_http_request_bytes(
     var method = String(String(unsafe_from_utf8=req_line.as_bytes()[:sp1]))
 
     var sp2 = -1
-    for i in range(sp1 + 1, len(req_line)):
+    for i in range(sp1 + 1, req_line.byte_length()):
         if req_line.unsafe_ptr()[i] == 32:
             sp2 = i
             break
@@ -276,17 +276,17 @@ def _parse_http_request_bytes(
 
     while True:
         var line = _read_line_buf(data, pos)
-        header_bytes += len(line)
+        header_bytes += line.byte_length()
         if header_bytes > max_header_size:
             raise Error(
                 "request headers exceed limit of "
                 + String(max_header_size)
                 + " bytes"
             )
-        if len(line) == 0:
+        if line.byte_length() == 0:
             break
         var colon = -1
-        for i in range(len(line)):
+        for i in range(line.byte_length()):
             if line.unsafe_ptr()[i] == 58:  # ':'
                 colon = i
                 break
@@ -304,7 +304,7 @@ def _parse_http_request_bytes(
     # ── 3. Body (Content-Length only for v0.1.0) ──────────────────────────────
     var body = List[UInt8]()
     var cl_str = headers.get("Content-Length")
-    if len(cl_str) > 0:
+    if cl_str.byte_length() > 0:
         var content_length = _parse_int_str(cl_str)
         if content_length > max_body_size:
             raise Error(
@@ -348,12 +348,12 @@ def _parse_http_request(
     """
     # ── 1. Request line ───────────────────────────────────────────────────────
     var req_line = _read_tcp_line(stream)
-    if len(req_line) == 0:
+    if req_line.byte_length() == 0:
         raise Error("empty request line")
 
     # Split on spaces: "METHOD PATH HTTP/1.1"
     var sp1 = -1
-    for i in range(len(req_line)):
+    for i in range(req_line.byte_length()):
         if req_line.unsafe_ptr()[i] == 32:  # space
             sp1 = i
             break
@@ -362,7 +362,7 @@ def _parse_http_request(
     var method = String(String(unsafe_from_utf8=req_line.as_bytes()[:sp1]))
 
     var sp2 = -1
-    for i in range(sp1 + 1, len(req_line)):
+    for i in range(sp1 + 1, req_line.byte_length()):
         if req_line.unsafe_ptr()[i] == 32:
             sp2 = i
             break
@@ -380,17 +380,17 @@ def _parse_http_request(
 
     while True:
         var line = _read_tcp_line(stream)
-        header_bytes += len(line)
+        header_bytes += line.byte_length()
         if header_bytes > max_header_size:
             raise Error(
                 "request headers exceed limit of "
                 + String(max_header_size)
                 + " bytes"
             )
-        if len(line) == 0:
+        if line.byte_length() == 0:
             break
         var colon = -1
-        for i in range(len(line)):
+        for i in range(line.byte_length()):
             if line.unsafe_ptr()[i] == 58:  # ':'
                 colon = i
                 break
@@ -408,7 +408,7 @@ def _parse_http_request(
     # ── 3. Body (Content-Length only for v0.1.0) ──────────────────────────────
     var body = List[UInt8]()
     var cl_str = headers.get("Content-Length")
-    if len(cl_str) > 0:
+    if cl_str.byte_length() > 0:
         var content_length = _parse_int_str(cl_str)
         if content_length > max_body_size:
             raise Error(
@@ -499,7 +499,7 @@ def _write_response(mut stream: TcpStream, resp: Response) raises:
         NetworkError: On I/O failure.
     """
     var reason = resp.reason
-    if len(reason) == 0:
+    if reason.byte_length() == 0:
         reason = _status_reason(resp.status)
 
     var wire = "HTTP/1.1 " + String(resp.status) + " " + reason + "\r\n"
@@ -508,8 +508,8 @@ def _write_response(mut stream: TcpStream, resp: Response) raises:
     # (we always set those ourselves below)
     for i in range(resp.headers.len()):
         var k = resp.headers._keys[i]
-        var kl = String(capacity=len(k))
-        for j in range(len(k)):
+        var kl = String(capacity=k.byte_length())
+        for j in range(k.byte_length()):
             var c = k.unsafe_ptr()[j]
             if c >= 65 and c <= 90:
                 kl += chr(Int(c) + 32)

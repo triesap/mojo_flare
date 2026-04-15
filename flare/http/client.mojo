@@ -244,7 +244,7 @@ struct HttpClient(Movable):
         Returns:
             Absolute URL string.
         """
-        if len(self._base_url) == 0:
+        if self._base_url.byte_length() == 0:
             return url
         if url.startswith("http://") or url.startswith("https://"):
             return url
@@ -529,7 +529,7 @@ struct HttpClient(Movable):
 
             if resp.is_redirect() and redirects < self._max_redirects:
                 var location = resp.headers.get("Location")
-                if len(location) == 0:
+                if location.byte_length() == 0:
                     return resp^  # redirect without Location: just return
                 # Handle relative redirects
                 if location.startswith("http://") or location.startswith(
@@ -600,7 +600,7 @@ struct HttpClient(Movable):
         wire += "Accept: */*\r\n"
 
         # Authorization header from stored auth credential
-        if len(self._auth_header) > 0:
+        if self._auth_header.byte_length() > 0:
             wire += "Authorization: " + self._auth_header + "\r\n"
 
         # Forward caller-supplied headers (skip Host — already set)
@@ -729,7 +729,7 @@ def _parse_http_response(raw: List[UInt8]) raises -> Response:
     var headers = HeaderMap()
     for i in range(1, len(lines)):
         var line = lines[i]
-        if len(line) == 0:
+        if line.byte_length() == 0:
             continue
         var colon = _str_find(line, ":")
         if colon < 0:
@@ -792,7 +792,7 @@ def _split_lines(s: String) -> List[String]:
     var lines = List[String]()
     var start = 0
     var i = 0
-    var n = len(s)
+    var n = s.byte_length()
     while i < n:
         if (
             s.unsafe_ptr()[i] == 13
@@ -844,7 +844,7 @@ def _parse_status_line(line: String) raises -> _StatusLine:
     var rest = String(
         String(String(unsafe_from_utf8=line.as_bytes()[sp1 + 1 :])).lstrip()
     )
-    if len(rest) < 3:
+    if rest.byte_length() < 3:
         raise NetworkError("HTTP status code too short: " + line)
     # Parse 3-digit code
     var code = 0
@@ -854,15 +854,15 @@ def _parse_status_line(line: String) raises -> _StatusLine:
             raise NetworkError("non-numeric HTTP status code in: " + line)
         code = code * 10 + (c - 48)
     var reason = String("")
-    if len(rest) > 4:
+    if rest.byte_length() > 4:
         reason = String(String(unsafe_from_utf8=rest.as_bytes()[4:]))
     return _StatusLine(code, reason^)
 
 
 def _str_find(s: String, sub: String) -> Int:
     """Return the index of the first ``sub`` in ``s``, or -1."""
-    var n = len(s)
-    var m = len(sub)
+    var n = s.byte_length()
+    var m = sub.byte_length()
     if m == 0:
         return 0
     for i in range(n - m + 1):
@@ -878,8 +878,8 @@ def _str_find(s: String, sub: String) -> Int:
 
 def _lower_str(s: String) -> String:
     """Return ASCII-lowercase copy of ``s``."""
-    var out = String(capacity=len(s))
-    for i in range(len(s)):
+    var out = String(capacity=s.byte_length())
+    for i in range(s.byte_length()):
         var c = s.unsafe_ptr()[i]
         if c >= 65 and c <= 90:
             out += chr(Int(c) + 32)
@@ -914,7 +914,7 @@ def _extract_body(
         return _decode_chunked(raw, body_start)
 
     var cl_str = headers.get("Content-Length")
-    if len(cl_str) > 0:
+    if cl_str.byte_length() > 0:
         var cl = _parse_int(cl_str)
         var available = len(raw) - body_start
         var body = List[UInt8](capacity=min(cl, available))
@@ -993,10 +993,10 @@ def _parse_int(s: String) -> Int:
     A valid ``Content-Length`` will never be 19+ digits in practice.
     """
     var trimmed = s.strip()
-    if len(trimmed) > 18:
+    if trimmed.byte_length() > 18:
         return 0  # overflow guard
     var result = 0
-    for i in range(len(trimmed)):
+    for i in range(trimmed.byte_length()):
         var c = Int(trimmed.unsafe_ptr()[i])
         if c < 48 or c > 57:
             break
@@ -1016,14 +1016,14 @@ def _parse_hex(s: String) raises -> Int:
     Raises:
         NetworkError: If the string is empty or contains non-hex characters.
     """
-    if len(s) == 0:
+    if s.byte_length() == 0:
         raise NetworkError("empty chunk-size in chunked encoding")
     # A 16-digit hex chunk size already exceeds 64 PiB; reject longer strings
     # to prevent Int overflow before the digit accumulation below.
-    if len(s) > 16:
+    if s.byte_length() > 16:
         raise NetworkError("chunk-size too large in chunked encoding: " + s)
     var result = 0
-    for i in range(len(s)):
+    for i in range(s.byte_length()):
         var c = Int(s.unsafe_ptr()[i])
         var digit: Int
         if c >= 48 and c <= 57:

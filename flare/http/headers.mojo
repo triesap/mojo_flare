@@ -10,8 +10,8 @@ from std.format import Writable, Writer
 @always_inline
 def _lower(s: String) -> String:
     """Return ASCII-lowercase copy of ``s``."""
-    var out = String(capacity=len(s))
-    for i in range(len(s)):
+    var out = String(capacity=s.byte_length())
+    for i in range(s.byte_length()):
         var c = s.unsafe_ptr()[i]
         if c >= 65 and c <= 90:  # 'A'..'Z'
             out += chr(Int(c) + 32)
@@ -43,11 +43,11 @@ struct HeaderInjectionError(Copyable, Movable, Writable):
 @always_inline
 def _check_injection(key: String, value: String) raises:
     """Raise ``HeaderInjectionError`` if key or value contain CR/LF."""
-    for i in range(len(key)):
+    for i in range(key.byte_length()):
         var c = key.unsafe_ptr()[i]
         if c == 13 or c == 10:  # CR or LF
             raise HeaderInjectionError(key, value)
-    for i in range(len(value)):
+    for i in range(value.byte_length()):
         var c = value.unsafe_ptr()[i]
         if c == 13 or c == 10:
             raise HeaderInjectionError(key, value)
