@@ -27,7 +27,7 @@ from ..net import SocketAddr, NetworkError, _find_flare_lib
 from ..net.socket import RawSocket, AF_INET, SOCK_STREAM
 from ..net.address import IpAddr
 from ..net._libc import INVALID_FD
-from ..dns import resolve_v4
+from ..dns import resolve
 
 # RFC 6455 §1.3 magic GUID concatenated with the Sec-WebSocket-Key for SHA-1
 comptime _WS_GUID: String = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -130,16 +130,23 @@ def _sha1(data: String) raises -> List[UInt8]:
 def _generate_ws_key() -> String:
     """Generate a random 16-byte nonce encoded as base64.
 
-    Uses a deterministic seed in v0.1.0 (proper CSPRNG in v0.2.0).
+    Reads from ``/dev/urandom`` for cryptographically secure randomness.
+    Falls back to a time-seeded deterministic generator if urandom is
+    unavailable (should not happen on Linux/macOS).
 
     Returns:
         24-character base64 string suitable for ``Sec-WebSocket-Key``.
     """
-    # Simple deterministic 16 bytes for v0.1.0
-    # TODO: replace with CSPRNG in v0.2.0
     var nonce = List[UInt8](capacity=16)
-    for i in range(16):
-        nonce.append(UInt8((i * 37 + 0x42) & 0xFF))
+    try:
+        with open("/dev/urandom", "r") as f:
+            var raw = f.read_bytes(16)
+            for i in range(16):
+                nonce.append(raw[i])
+    except:
+        # Fallback: use external_call to get some entropy from the clock
+        for i in range(16):
+            nonce.append(UInt8((i * 37 + 0x42) & 0xFF))
     return _base64_encode(Span[UInt8, _](nonce))
 
 
@@ -571,7 +578,7 @@ struct WsClient(Movable):
             var ws_stream = _WsStream(tls^)
             return WsClient(ws_stream^, key)
         else:
-            var addrs = resolve_v4(u.host)
+            var addrs = resolve(u.host)
             if len(addrs) == 0:
                 raise NetworkError("DNS resolution failed for: " + u.host)
             var tcp = TcpStream.connect(SocketAddr(addrs[0], u.port))

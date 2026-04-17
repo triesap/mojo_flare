@@ -468,12 +468,22 @@ struct WsFrame(Movable, Writable):
         """
         return (self.opcode & 0x8) != 0
 
-    def text_payload(self) -> String:
-        """Decode the payload as a UTF-8 string.
+    def text_payload(self) raises -> String:
+        """Decode the payload as a UTF-8 string with validation.
+
+        Validates that the payload is well-formed UTF-8 per RFC 6455 §8.1.
+        Raises ``WsProtocolError`` on invalid sequences.
 
         Returns:
             Payload bytes decoded as a ``String``.
+
+        Raises:
+            WsProtocolError: If the payload contains invalid UTF-8.
         """
+        if not _is_valid_utf8(self.payload):
+            raise WsProtocolError(
+                "TEXT frame payload is not valid UTF-8"
+            )
         var s = String(capacity=len(self.payload) + 1)
         for b in self.payload:
             s += chr(Int(b))
@@ -489,6 +499,58 @@ struct WsFrame(Movable, Writable):
             len(self.payload),
             ")",
         )
+
+
+# ── UTF-8 validation ──────────────────────────────────────────────────────────
+
+
+def _is_valid_utf8(data: List[UInt8]) -> Bool:
+    """Validate that ``data`` is well-formed UTF-8.
+
+    Checks byte sequences per RFC 3629: 1-byte (ASCII), 2-byte, 3-byte, and
+    4-byte sequences. Rejects overlong encodings, surrogates (U+D800..U+DFFF),
+    and codepoints above U+10FFFF.
+    """
+    var n = len(data)
+    var i = 0
+    while i < n:
+        var b = data[i]
+        if b <= 0x7F:
+            i += 1
+        elif b >= 0xC2 and b <= 0xDF:
+            if i + 1 >= n:
+                return False
+            if data[i + 1] < 0x80 or data[i + 1] > 0xBF:
+                return False
+            i += 2
+        elif b >= 0xE0 and b <= 0xEF:
+            if i + 2 >= n:
+                return False
+            var b1 = data[i + 1]
+            var b2 = data[i + 2]
+            if b1 < 0x80 or b1 > 0xBF or b2 < 0x80 or b2 > 0xBF:
+                return False
+            if b == 0xE0 and b1 < 0xA0:
+                return False
+            if b == 0xED and b1 > 0x9F:
+                return False
+            i += 3
+        elif b >= 0xF0 and b <= 0xF4:
+            if i + 3 >= n:
+                return False
+            var b1 = data[i + 1]
+            var b2 = data[i + 2]
+            var b3 = data[i + 3]
+            if b1 < 0x80 or b1 > 0xBF or b2 < 0x80 or b2 > 0xBF or b3 < 0x80 or b3 > 0xBF:
+                return False
+            if b == 0xF0 and b1 < 0x90:
+                return False
+            if b == 0xF4 and b1 > 0x8F:
+                return False
+            i += 4
+        else:
+            return False
+    return True
 
 
 # ── SIMD masking helper ───────────────────────────────────────────────────────
