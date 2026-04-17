@@ -23,6 +23,7 @@ from .frame import (
 from ..http.url import Url
 from ..tls import TlsStream, TlsConfig
 from ..tcp import TcpStream
+from ..tcp.stream import _connect_with_fallback
 from ..net import SocketAddr, NetworkError, _find_flare_lib
 from ..net.socket import RawSocket, AF_INET, SOCK_STREAM
 from ..net.address import IpAddr
@@ -580,10 +581,7 @@ struct WsClient(Movable):
             var ws_stream = _WsStream(tls^)
             return WsClient(ws_stream^, key)
         else:
-            var addrs = resolve(u.host)
-            if len(addrs) == 0:
-                raise NetworkError("DNS resolution failed for: " + u.host)
-            var tcp = TcpStream.connect(SocketAddr(addrs[0], u.port))
+            var tcp = _connect_with_fallback(u.host, u.port, 5000)
             var req_bytes = req.as_bytes()
             tcp.write_all(Span[UInt8, _](req_bytes))
 

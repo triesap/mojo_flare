@@ -335,18 +335,16 @@ struct TcpStream(Movable):
             var stream = TcpStream.connect("example.com", 80)
             ```
         """
-        from ..dns import resolve
-
-        var addrs = resolve(host)
-        if len(addrs) == 0:
-            raise DnsError("DNS resolution returned no results for: " + host)
-        return TcpStream.connect(SocketAddr(addrs[0], port))
+        return _connect_with_fallback(host, port, 5000)
 
     @staticmethod
     def connect(
         host: String, port: UInt16, timeout_ms: Int
     ) raises -> TcpStream:
         """Resolve ``host`` via DNS (dual-stack) and connect with a timeout.
+
+        Tries each resolved address in order (IPv4 and IPv6), falling back
+        to the next on failure.
 
         Args:
             host:       Hostname or IP address string.
@@ -358,16 +356,11 @@ struct TcpStream(Movable):
 
         Raises:
             DnsError:          If ``host`` cannot be resolved.
-            ConnectionTimeout: If the deadline expires.
-            ConnectionRefused: If the remote port actively refuses.
+            ConnectionTimeout: If all addresses time out.
+            ConnectionRefused: If all addresses refuse.
             NetworkError:      For any other OS error.
         """
-        from ..dns import resolve
-
-        var addrs = resolve(host)
-        if len(addrs) == 0:
-            raise DnsError("DNS resolution returned no results for: " + host)
-        return TcpStream.connect_timeout(SocketAddr(addrs[0], port), timeout_ms)
+        return _connect_with_fallback(host, port, timeout_ms)
 
     # ── Context manager ───────────────────────────────────────────────────────
 
@@ -622,3 +615,41 @@ struct TcpStream(Movable):
             ms: Timeout in milliseconds. 0 disables the timeout.
         """
         self._socket.set_send_timeout(ms)
+
+
+def _connect_with_fallback(
+    host: String, port: UInt16, timeout_ms: Int
+) raises -> TcpStream:
+    """Resolve ``host`` and try each resolved address until one connects.
+
+    Uses ``resolve()`` (dual-stack DNS) and iterates through results in
+    OS-preferred order, falling back to the next address if connect fails
+    or times out. This handles environments where IPv6 is advertised by
+    DNS but unreachable on the local network.
+
+    Args:
+        host:       Hostname to resolve.
+        port:       TCP port.
+        timeout_ms: Per-address connect timeout in milliseconds.
+
+    Returns:
+        A connected ``TcpStream``.
+
+    Raises:
+        DnsError:     If ``host`` cannot be resolved.
+        NetworkError: If every resolved address fails to connect.
+    """
+    from ..dns import resolve
+
+    var addrs = resolve(host)
+    if len(addrs) == 0:
+        raise DnsError("DNS resolution returned no results for: " + host)
+    var last_err = String("")
+    for i in range(len(addrs)):
+        try:
+            return TcpStream.connect_timeout(
+                SocketAddr(addrs[i], port), timeout_ms
+            )
+        except e:
+            last_err = String(e)
+    raise NetworkError("all addresses failed for " + host + ": " + last_err)

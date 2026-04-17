@@ -33,6 +33,7 @@ from std.memory import UnsafePointer, stack_allocation
 from ..dns import resolve
 from ..net import SocketAddr, NetworkError, _find_flare_lib
 from ..tcp import TcpStream
+from ..tcp.stream import _connect_with_fallback
 from ..io import Readable
 from .config import TlsConfig, TlsVerify
 from .error import (
@@ -234,13 +235,8 @@ struct TlsStream(Movable, Readable):
                 file=stderr,
             )
 
-        # ── 1. DNS resolution and TCP connect ─────────────────────────────────
-        var addrs = resolve(host)
-        if len(addrs) == 0:
-            raise NetworkError(
-                "DNS resolution returned no addresses for: " + host
-            )
-        var tcp = TcpStream.connect(SocketAddr(addrs[0], port))
+        # ── 1. DNS resolution and TCP connect with fallback ───────────────────
+        var tcp = _connect_with_fallback(host, port, 5000)
 
         # ── 2. Load OpenSSL wrapper library ───────────────────────────────────
         var lib = OwnedDLHandle(_find_flare_lib())
@@ -358,14 +354,7 @@ struct TlsStream(Movable, Readable):
                 file=stderr,
             )
 
-        var addrs = resolve(host)
-        if len(addrs) == 0:
-            raise NetworkError(
-                "DNS resolution returned no addresses for: " + host
-            )
-        var tcp = TcpStream.connect_timeout(
-            SocketAddr(addrs[0], port), timeout_ms
-        )
+        var tcp = _connect_with_fallback(host, port, timeout_ms)
 
         var lib = OwnedDLHandle(_find_flare_lib())
         var fn_ctx_new = lib.get_function[def() thin abi("C") -> Int](

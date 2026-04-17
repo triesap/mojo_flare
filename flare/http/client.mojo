@@ -43,6 +43,7 @@ from .url import Url
 from .auth import Auth, BasicAuth, BearerAuth
 from .error import HttpError, TooManyRedirects
 from ..tcp import TcpStream
+from ..tcp.stream import _connect_with_fallback
 from ..tls import TlsStream, TlsConfig
 from ..net import NetworkError
 from json import dumps, Value as JsonValue
@@ -627,11 +628,8 @@ struct HttpClient(Movable):
             stream.close()
             return resp^
         else:
-            var addrs = resolve(u.host)
-            if len(addrs) == 0:
-                raise NetworkError("DNS resolution failed for: " + u.host)
-            var stream = TcpStream.connect_timeout(
-                SocketAddr(addrs[0], u.port), self._timeout_ms
+            var stream = _connect_with_fallback(
+                u.host, u.port, self._timeout_ms
             )
             var wire_bytes = wire.as_bytes()
             stream.write_all(Span[UInt8, _](wire_bytes))
