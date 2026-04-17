@@ -20,6 +20,7 @@ from ..net import (
 from ..net.socket import (
     RawSocket,
     AF_INET,
+    AF_INET6,
     SOCK_STREAM,
     _build_sockaddr_in,
     _sockaddr_to_socket_addr,
@@ -30,6 +31,7 @@ from ..net._libc import (
     _accept,
     _strerror,
     SOCKADDR_IN_SIZE,
+    SOCKADDR_IN6_SIZE,
 )
 from .stream import TcpStream
 
@@ -129,9 +131,9 @@ struct TcpListener(Movable):
             )
             ```
         """
-        var sock = RawSocket(AF_INET, SOCK_STREAM)
+        var family = AF_INET6 if addr.ip.is_v6() else AF_INET
+        var sock = RawSocket(family, SOCK_STREAM)
 
-        # SO_REUSEADDR must be set before bind — mandatory by spec
         sock.set_reuse_addr(True)
         if reuse_port:
             sock.set_reuse_port(True)
@@ -179,11 +181,11 @@ struct TcpListener(Movable):
                 client.close()
             ```
         """
-        var peer_buf = stack_allocation[Int(SOCKADDR_IN_SIZE), UInt8]()
-        for i in range(Int(SOCKADDR_IN_SIZE)):
+        var peer_buf = stack_allocation[Int(SOCKADDR_IN6_SIZE), UInt8]()
+        for i in range(Int(SOCKADDR_IN6_SIZE)):
             (peer_buf + i).init_pointee_copy(0)
         var peer_len = stack_allocation[1, c_uint]()
-        peer_len.init_pointee_copy(SOCKADDR_IN_SIZE)
+        peer_len.init_pointee_copy(SOCKADDR_IN6_SIZE)
 
         var client_fd = _accept(self._socket.fd, peer_buf, peer_len)
         if client_fd < 0:
@@ -191,9 +193,9 @@ struct TcpListener(Movable):
             raise NetworkError(_strerror(e.value) + " (accept)", Int(e.value))
 
         var peer = _sockaddr_to_socket_addr(peer_buf)
+        var client_family = AF_INET6 if peer.ip.is_v6() else AF_INET
 
-        # Wrap the accepted fd without calling socket() again
-        var client_sock = RawSocket(client_fd, AF_INET, SOCK_STREAM, True)
+        var client_sock = RawSocket(client_fd, client_family, SOCK_STREAM, True)
         client_sock.set_tcp_nodelay(True)
 
         return TcpStream(client_sock^, peer)

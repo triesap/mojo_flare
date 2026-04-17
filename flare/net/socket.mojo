@@ -53,10 +53,14 @@ from ._libc import (
     O_NONBLOCK,
     INVALID_FD,
     SOCKADDR_IN_SIZE,
+    SOCKADDR_IN6_SIZE,
     TIMEVAL_SIZE,
     _fill_sockaddr_in,
+    _fill_sockaddr_in6,
     _read_port_from_sockaddr,
     _read_ip_from_sockaddr,
+    _read_ipv6_from_sockaddr,
+    _get_family_from_sockaddr,
     _os_error,
     _strerror,
     _socket,
@@ -353,24 +357,19 @@ struct RawSocket(Movable):
     def local_addr(self) raises -> SocketAddr:
         """Return the local address assigned by the OS.
 
+        Supports both IPv4 and IPv6 sockets (buffer sized for sockaddr_in6).
+
         Returns:
-            The local ``SocketAddr`` (IP + port). Useful after ``bind()``
-            with port 0 to discover the ephemeral port chosen by the kernel.
+            The local ``SocketAddr`` (IP + port).
 
         Raises:
             NetworkError: If ``getsockname(2)`` fails.
-
-        Example:
-            ```mojo
-            var addr = sock.local_addr()
-            print(addr)  # e.g. 127.0.0.1:54321
-            ```
         """
-        var buf = stack_allocation[16, UInt8]()
-        for i in range(16):
+        var buf = stack_allocation[28, UInt8]()
+        for i in range(28):
             (buf + i).init_pointee_copy(0)
         var len_ptr = stack_allocation[1, c_uint]()
-        len_ptr.init_pointee_copy(16)
+        len_ptr.init_pointee_copy(c_uint(28))
         var rc = _getsockname(self.fd, buf, len_ptr)
         if rc < 0:
             var e = get_errno()
@@ -380,17 +379,19 @@ struct RawSocket(Movable):
     def peer_addr(self) raises -> SocketAddr:
         """Return the remote address of the connected peer.
 
+        Supports both IPv4 and IPv6 sockets.
+
         Returns:
             The peer ``SocketAddr``.
 
         Raises:
             NetworkError: If ``getpeername(2)`` fails (e.g. not connected).
         """
-        var buf = stack_allocation[16, UInt8]()
-        for i in range(16):
+        var buf = stack_allocation[28, UInt8]()
+        for i in range(28):
             (buf + i).init_pointee_copy(0)
         var len_ptr = stack_allocation[1, c_uint]()
-        len_ptr.init_pointee_copy(16)
+        len_ptr.init_pointee_copy(c_uint(28))
         var rc = _getpeername(self.fd, buf, len_ptr)
         if rc < 0:
             var e = get_errno()
@@ -454,55 +455,71 @@ struct RawSocket(Movable):
 def _build_sockaddr_in(
     addr: SocketAddr,
 ) raises -> Tuple[type_of(alloc[UInt8](0)), c_uint]:
-    """Allocate and populate a heap ``sockaddr_in`` buffer for ``addr``.
+    """Allocate and populate a heap ``sockaddr_in`` or ``sockaddr_in6`` buffer.
 
-    The caller is responsible for freeing the returned pointer via
-    ``ptr.free()`` once the buffer is no longer needed (i.e., after the
-    syscall that consumes it). Only IPv4 addresses are supported.
+    Branches on ``addr.ip.is_v6()`` to build the correct sockaddr type.
 
     Args:
-        addr: The socket address to encode.
+        addr: The socket address to encode (IPv4 or IPv6).
 
     Returns:
         A tuple of ``(heap_pointer_to_buf, buf_size_bytes)``.
 
     Raises:
-        AddressParseError: If the IP string is not a valid IPv4 address.
-        NetworkError:      If ``inet_pton`` returns an unexpected error.
+        AddressParseError: If the IP string is not a valid address.
     """
-    var ip_buf = alloc[UInt8](4)
-    for i in range(4):
-        (ip_buf + i).init_pointee_copy(0)
-
-    var rc = _inet_pton(AF_INET, String(addr.ip), ip_buf)
-    if rc != 1:
+    if addr.ip.is_v6():
+        var ip_buf = alloc[UInt8](16)
+        for i in range(16):
+            (ip_buf + i).init_pointee_copy(0)
+        var rc = _inet_pton(AF_INET6, String(addr.ip), ip_buf)
+        if rc != 1:
+            ip_buf.free()
+            raise AddressParseError(String(addr.ip))
+        var sa = alloc[UInt8](28)
+        for i in range(28):
+            (sa + i).init_pointee_copy(0)
+        _fill_sockaddr_in6(sa, addr.port, ip_buf)
         ip_buf.free()
-        raise AddressParseError(String(addr.ip))
-
-    var sa = alloc[UInt8](16)
-    for i in range(16):
-        (sa + i).init_pointee_copy(0)
-
-    _fill_sockaddr_in(sa, addr.port, ip_buf)
-    ip_buf.free()
-    return Tuple(sa, SOCKADDR_IN_SIZE)
+        return Tuple(sa, SOCKADDR_IN6_SIZE)
+    else:
+        var ip_buf = alloc[UInt8](4)
+        for i in range(4):
+            (ip_buf + i).init_pointee_copy(0)
+        var rc = _inet_pton(AF_INET, String(addr.ip), ip_buf)
+        if rc != 1:
+            ip_buf.free()
+            raise AddressParseError(String(addr.ip))
+        var sa = alloc[UInt8](16)
+        for i in range(16):
+            (sa + i).init_pointee_copy(0)
+        _fill_sockaddr_in(sa, addr.port, ip_buf)
+        ip_buf.free()
+        return Tuple(sa, SOCKADDR_IN_SIZE)
 
 
 def _sockaddr_to_socket_addr(buf: UnsafePointer[UInt8, _]) raises -> SocketAddr:
-    """Extract a ``SocketAddr`` from a 16-byte ``sockaddr_in`` buffer.
+    """Extract a ``SocketAddr`` from a ``sockaddr_in`` or ``sockaddr_in6`` buffer.
+
+    Reads the address family from the buffer to determine the format.
 
     Args:
-        buf: Pointer to 16 bytes returned by ``getsockname`` / ``getpeername``.
+        buf: Pointer to sockaddr buffer returned by ``getsockname``/``accept``/etc.
 
     Returns:
         The decoded ``SocketAddr``.
 
     Raises:
-        NetworkError: If ``inet_ntop`` fails.
+        NetworkError: If ``inet_ntop`` fails or the family is unknown.
     """
+    var family = _get_family_from_sockaddr(buf)
     var port = _read_port_from_sockaddr(buf)
-    var ip_str = _read_ip_from_sockaddr(buf)
-    return SocketAddr(IpAddr(ip_str, is_v6=False), port)
+    if family == AF_INET6:
+        var ip_str = _read_ipv6_from_sockaddr(buf)
+        return SocketAddr(IpAddr(ip_str, is_v6=True), port)
+    else:
+        var ip_str = _read_ip_from_sockaddr(buf)
+        return SocketAddr(IpAddr(ip_str, is_v6=False), port)
 
 
 def _raise_net_error(op: String) raises:

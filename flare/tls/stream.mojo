@@ -30,7 +30,7 @@ Example:
 from std.sys import stderr
 from std.ffi import OwnedDLHandle, c_int
 from std.memory import UnsafePointer, stack_allocation
-from ..dns import resolve_v4
+from ..dns import resolve
 from ..net import SocketAddr, NetworkError, _find_flare_lib
 from ..tcp import TcpStream
 from ..io import Readable
@@ -235,7 +235,7 @@ struct TlsStream(Movable, Readable):
             )
 
         # ── 1. DNS resolution and TCP connect ─────────────────────────────────
-        var addrs = resolve_v4(host)
+        var addrs = resolve(host)
         if len(addrs) == 0:
             raise NetworkError(
                 "DNS resolution returned no addresses for: " + host
@@ -354,7 +354,7 @@ struct TlsStream(Movable, Readable):
                 file=stderr,
             )
 
-        var addrs = resolve_v4(host)
+        var addrs = resolve(host)
         if len(addrs) == 0:
             raise NetworkError(
                 "DNS resolution returned no addresses for: " + host

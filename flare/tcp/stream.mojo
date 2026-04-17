@@ -42,6 +42,7 @@ from ..net import (
 from ..net.socket import (
     RawSocket,
     AF_INET,
+    AF_INET6,
     SOCK_STREAM,
     _build_sockaddr_in,
     _sockaddr_to_socket_addr,
@@ -144,7 +145,8 @@ struct TcpStream(Movable):
             var stream = TcpStream.connect(SocketAddr.localhost(8080))
             ```
         """
-        var sock = RawSocket(AF_INET, SOCK_STREAM)
+        var family = AF_INET6 if addr.ip.is_v6() else AF_INET
+        var sock = RawSocket(family, SOCK_STREAM)
         var sa = _build_sockaddr_in(addr)
         var rc = _connect(sock.fd, sa[0], sa[1])
         sa[0].free()
@@ -195,7 +197,8 @@ struct TcpStream(Movable):
             var stream = TcpStream.connect_timeout(SocketAddr.localhost(8080), 5000)
             ```
         """
-        var sock = RawSocket(AF_INET, SOCK_STREAM)
+        var family = AF_INET6 if addr.ip.is_v6() else AF_INET
+        var sock = RawSocket(family, SOCK_STREAM)
         var sa = _build_sockaddr_in(addr)
 
         comptime if CompilationTarget.is_macos():
@@ -332,9 +335,9 @@ struct TcpStream(Movable):
             var stream = TcpStream.connect("example.com", 80)
             ```
         """
-        from ..dns import resolve_v4
+        from ..dns import resolve
 
-        var addrs = resolve_v4(host)
+        var addrs = resolve(host)
         if len(addrs) == 0:
             raise DnsError("DNS resolution returned no results for: " + host)
         return TcpStream.connect(SocketAddr(addrs[0], port))
@@ -343,10 +346,7 @@ struct TcpStream(Movable):
     def connect(
         host: String, port: UInt16, timeout_ms: Int
     ) raises -> TcpStream:
-        """Resolve ``host`` via DNS and connect with a timeout.
-
-        Convenience overload that performs DNS resolution then calls
-        ``TcpStream.connect_timeout(SocketAddr(...), timeout_ms)``.
+        """Resolve ``host`` via DNS (dual-stack) and connect with a timeout.
 
         Args:
             host:       Hostname or IP address string.
@@ -361,15 +361,10 @@ struct TcpStream(Movable):
             ConnectionTimeout: If the deadline expires.
             ConnectionRefused: If the remote port actively refuses.
             NetworkError:      For any other OS error.
-
-        Example:
-            ```mojo
-            var stream = TcpStream.connect("example.com", 80, 5000)
-            ```
         """
-        from ..dns import resolve_v4
+        from ..dns import resolve
 
-        var addrs = resolve_v4(host)
+        var addrs = resolve(host)
         if len(addrs) == 0:
             raise DnsError("DNS resolution returned no results for: " + host)
         return TcpStream.connect_timeout(SocketAddr(addrs[0], port), timeout_ms)

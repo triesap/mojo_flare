@@ -12,7 +12,7 @@ Test strategy:
     developer machines, and blackhole IPs for timeout tests.
 """
 
-from std.testing import assert_equal, assert_not_equal, assert_raises, TestSuite
+from std.testing import assert_equal, assert_not_equal, assert_true, assert_raises, TestSuite
 from flare.tcp import TcpStream, TcpListener
 from flare.net import SocketAddr, IpAddr
 
@@ -346,9 +346,61 @@ def test_reuseaddr_allows_rebind() raises:
     l2.close()
 
 
+# ── IPv6 tests ────────────────────────────────────────────────────────────────
+
+
+def test_v6_listener_bind() raises:
+    """TcpListener.bind on [::1]:0 succeeds and returns an IPv6 address."""
+    var addr = SocketAddr(IpAddr.localhost_v6(), 0)
+    var listener = TcpListener.bind(addr)
+    var local = listener.local_addr()
+    assert_true(local.ip.is_v6(), "Expected IPv6 local address")
+    assert_true(local.port > 0, "Expected non-zero port")
+    listener.close()
+
+
+def test_v6_connect_loopback() raises:
+    """TcpStream.connect to [::1] succeeds and round-trips data."""
+    var addr = SocketAddr(IpAddr.localhost_v6(), 0)
+    var listener = TcpListener.bind(addr)
+    var port = listener.local_addr().port
+
+    var client = TcpStream.connect(SocketAddr(IpAddr.localhost_v6(), port))
+    var server = listener.accept()
+
+    var msg = "hello v6"
+    client.write_all(Span[UInt8, _](msg.as_bytes()))
+
+    var buf = List[UInt8](capacity=64)
+    buf.resize(64, 0)
+    var n = server.read(buf.unsafe_ptr(), 64)
+    assert_equal(n, msg.byte_length())
+
+    server.close()
+    client.close()
+    listener.close()
+
+
+def test_v6_peer_addr() raises:
+    """Accepted IPv6 stream reports v6 peer address."""
+    var addr = SocketAddr(IpAddr.localhost_v6(), 0)
+    var listener = TcpListener.bind(addr)
+    var port = listener.local_addr().port
+
+    var client = TcpStream.connect(SocketAddr(IpAddr.localhost_v6(), port))
+    var server = listener.accept()
+
+    var peer = server.peer_addr()
+    assert_true(peer.ip.is_v6(), "Expected IPv6 peer address")
+
+    server.close()
+    client.close()
+    listener.close()
+
+
 def main() raises:
     print("=" * 60)
-    print("test_tcp.mojo — TcpStream + TcpListener")
+    print("test_tcp.mojo — TcpStream + TcpListener (IPv4 + IPv6)")
     print("=" * 60)
     print()
     TestSuite.discover_tests[__functions_in_module()]().run()

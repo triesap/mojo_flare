@@ -229,6 +229,56 @@ def _fill_sockaddr_in(
 
 
 @always_inline
+def _fill_sockaddr_in6(
+    buf: UnsafePointer[UInt8, _],
+    port: UInt16,
+    ip_bytes: UnsafePointer[UInt8, _],
+) where type_of(buf).mut:
+    """Populate a 28-byte IPv6 ``sockaddr_in6`` buffer in-place.
+
+    Layout (28 bytes):
+        - [0-1]   sin6_family (AF_INET6) — BSD: [len, family]; Linux: [family_lo, family_hi]
+        - [2-3]   sin6_port (big-endian)
+        - [4-7]   sin6_flowinfo (zeroed)
+        - [8-23]  sin6_addr (16-byte IPv6 address, from ``inet_pton``)
+        - [24-27] sin6_scope_id (zeroed)
+
+    Args:
+        buf:      Caller-allocated 28-byte buffer.
+        port:     Port in host byte order; stored as big-endian.
+        ip_bytes: 16-byte IPv6 address in network byte order.
+
+    Safety:
+        ``buf`` must point to at least 28 bytes. ``ip_bytes`` must
+        point to at least 16 valid bytes.
+    """
+    var af6 = Int(AF_INET6)
+
+    comptime if CompilationTarget.is_macos():
+        (buf + 0).init_pointee_copy(UInt8(28))       # sin6_len
+        (buf + 1).init_pointee_copy(UInt8(af6))       # AF_INET6
+    else:
+        (buf + 0).init_pointee_copy(UInt8(af6 & 0xFF))
+        (buf + 1).init_pointee_copy(UInt8((af6 >> 8) & 0xFF))
+
+    # Port in network byte order
+    (buf + 2).init_pointee_copy(UInt8(port >> 8))
+    (buf + 3).init_pointee_copy(UInt8(port & 0xFF))
+
+    # sin6_flowinfo (4 bytes zeroed)
+    for i in range(4, 8):
+        (buf + i).init_pointee_copy(UInt8(0))
+
+    # sin6_addr (16 bytes)
+    for i in range(16):
+        (buf + 8 + i).init_pointee_copy((ip_bytes + i).load())
+
+    # sin6_scope_id (4 bytes zeroed)
+    for i in range(24, 28):
+        (buf + i).init_pointee_copy(UInt8(0))
+
+
+@always_inline
 def _read_port_from_sockaddr(buf: UnsafePointer[UInt8, _]) -> UInt16:
     """Extract and byte-swap the port from a ``sockaddr_in`` buffer.
 
@@ -277,6 +327,51 @@ def _read_ip_from_sockaddr(buf: UnsafePointer[UInt8, _]) raises -> String:
     if ntop_buf[0] == 0:
         raise Error("inet_ntop failed: errno " + String(get_errno()))
     return String(StringSlice(unsafe_from_utf8_ptr=ntop_buf))
+
+
+@always_inline
+def _read_ipv6_from_sockaddr(buf: UnsafePointer[UInt8, _]) raises -> String:
+    """Extract the IPv6 address string from a ``sockaddr_in6`` buffer.
+
+    Args:
+        buf: Pointer to a 28-byte ``sockaddr_in6``.
+
+    Returns:
+        The IPv6 address string (e.g. ``"::1"``).
+
+    Raises:
+        Error: If ``inet_ntop`` fails.
+    """
+    var ntop_buf = stack_allocation[64, UInt8]()
+    for i in range(64):
+        (ntop_buf + i).init_pointee_copy(0)
+
+    # inet_ntop(AF_INET6, &sin6_addr, dst, dst_len) — sin6_addr at offset 8
+    _ = external_call["inet_ntop", UnsafePointer[UInt8, MutExternalOrigin]](
+        AF_INET6,
+        (buf + 8).bitcast[NoneType](),
+        ntop_buf.bitcast[c_char](),
+        c_uint(64),
+    )
+    if ntop_buf[0] == 0:
+        raise Error("inet_ntop (IPv6) failed: errno " + String(get_errno()))
+    return String(StringSlice(unsafe_from_utf8_ptr=ntop_buf))
+
+
+@always_inline
+def _get_family_from_sockaddr(buf: UnsafePointer[UInt8, _]) -> c_int:
+    """Read the address family from a sockaddr buffer.
+
+    Handles both Linux (sa_family at offset 0, 2 bytes LE) and macOS/BSD
+    (sa_family at offset 1, 1 byte).
+
+    Returns:
+        ``AF_INET`` or ``AF_INET6``.
+    """
+    comptime if CompilationTarget.is_macos():
+        return c_int(Int(buf[1]))
+    else:
+        return c_int(Int(buf[0]) | (Int(buf[1]) << 8))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
