@@ -1,23 +1,44 @@
 """HTTP header collection with case-insensitive key lookup.
 
-All keys are normalised to lowercase for comparison (RFC 7230 §3.2).
-The original casing is preserved in the ``_keys`` list for serialisation.
+Lookups use inline case-insensitive byte comparison (no pre-computed
+lowercase mirror). Original casing is preserved for wire serialisation.
 """
 
 from std.format import Writable, Writer
 
 
 @always_inline
+def _eq_icase(a: String, b: String) -> Bool:
+    """Case-insensitive ASCII string comparison without allocation."""
+    if a.byte_length() != b.byte_length():
+        return False
+    var ap = a.unsafe_ptr()
+    var bp = b.unsafe_ptr()
+    for i in range(a.byte_length()):
+        var ac = ap[i]
+        var bc = bp[i]
+        if ac >= 65 and ac <= 90:
+            ac = ac + 32
+        if bc >= 65 and bc <= 90:
+            bc = bc + 32
+        if ac != bc:
+            return False
+    return True
+
+
+@always_inline
 def _lower(s: String) -> String:
     """Return ASCII-lowercase copy of ``s``."""
-    var out = String(capacity=s.byte_length())
-    for i in range(s.byte_length()):
-        var c = s.unsafe_ptr()[i]
-        if c >= 65 and c <= 90:  # 'A'..'Z'
-            out += chr(Int(c) + 32)
+    var n = s.byte_length()
+    var src = s.unsafe_ptr()
+    var buf = List[UInt8](capacity=n)
+    for i in range(n):
+        var c = src[i]
+        if c >= 65 and c <= 90:
+            buf.append(c + 32)
         else:
-            out += chr(Int(c))
-    return out
+            buf.append(c)
+    return String(String(unsafe_from_utf8=Span[UInt8, _](buf)))
 
 
 struct HeaderInjectionError(Copyable, Movable, Writable):
@@ -45,7 +66,7 @@ def _check_injection(key: String, value: String) raises:
     """Raise ``HeaderInjectionError`` if key or value contain CR/LF."""
     for i in range(key.byte_length()):
         var c = key.unsafe_ptr()[i]
-        if c == 13 or c == 10:  # CR or LF
+        if c == 13 or c == 10:
             raise HeaderInjectionError(key, value)
     for i in range(value.byte_length()):
         var c = value.unsafe_ptr()[i]
@@ -56,13 +77,10 @@ def _check_injection(key: String, value: String) raises:
 struct HeaderMap(Movable, Writable):
     """An ordered, case-insensitive HTTP header collection.
 
-    Keys are stored in their original casing but all lookups are
-    case-insensitive per RFC 7230 §3.2.  Lookups use lowercase
-    comparison on ``_lower_keys``; original casing is kept in ``_keys``
-    for wire serialisation.
+    Keys are stored in their original casing. Lookups use inline
+    case-insensitive byte comparison -- no pre-computed lowercase list.
 
-    This type is ``Movable`` (owns heap-allocated lists) but not
-    ``Copyable`` to avoid accidental deep copies in hot paths.
+    This type is ``Movable`` but not ``Copyable``.
     Use ``copy()`` when an explicit copy is needed.
 
     Example:
@@ -74,26 +92,36 @@ struct HeaderMap(Movable, Writable):
     """
 
     var _keys: List[String]
-    var _lower_keys: List[
-        String
-    ]  # lowercase mirror for O(n) case-insensitive lookup
     var _values: List[String]
 
     def __init__(out self):
         self._keys = List[String]()
-        self._lower_keys = List[String]()
         self._values = List[String]()
 
-    def copy(self) -> HeaderMap:
-        """Return a deep copy of this ``HeaderMap``.
+    def set_unchecked(mut self, key: String, lk: String, value: String):
+        """Set a header without injection checks.
 
-        Returns:
-            A new ``HeaderMap`` with the same headers.
+        The ``lk`` parameter is accepted for API compatibility but ignored;
+        lookup uses inline case-insensitive comparison on ``key``.
+
+        Args:
+            key:   Header name.
+            lk:    Ignored (kept for backward compat).
+            value: Header value.
         """
+        for i in range(len(self._keys)):
+            if _eq_icase(self._keys[i], key):
+                self._keys[i] = key
+                self._values[i] = value
+                return
+        self._keys.append(key)
+        self._values.append(value)
+
+    def copy(self) -> HeaderMap:
+        """Return a deep copy of this ``HeaderMap``."""
         var out = HeaderMap()
         for i in range(len(self._keys)):
             out._keys.append(self._keys[i])
-            out._lower_keys.append(self._lower_keys[i])
             out._values.append(self._values[i])
         return out^
 
@@ -108,20 +136,16 @@ struct HeaderMap(Movable, Writable):
             HeaderInjectionError: If ``key`` or ``value`` contains ``\\r`` or ``\\n``.
         """
         _check_injection(key, value)
-        var lk = _lower(key)
-        for i in range(len(self._lower_keys)):
-            if self._lower_keys[i] == lk:
+        for i in range(len(self._keys)):
+            if _eq_icase(self._keys[i], key):
                 self._keys[i] = key
                 self._values[i] = value
                 return
         self._keys.append(key)
-        self._lower_keys.append(lk)
         self._values.append(value)
 
     def append(mut self, key: String, value: String) raises:
         """Append a header without replacing existing values.
-
-        Useful for multi-value headers such as ``Set-Cookie``.
 
         Args:
             key:   Header name.
@@ -132,7 +156,6 @@ struct HeaderMap(Movable, Writable):
         """
         _check_injection(key, value)
         self._keys.append(key)
-        self._lower_keys.append(_lower(key))
         self._values.append(value)
 
     def get(self, key: String) -> String:
@@ -144,9 +167,8 @@ struct HeaderMap(Movable, Writable):
         Returns:
             The header value, or ``""`` if not present.
         """
-        var lk = _lower(key)
-        for i in range(len(self._lower_keys)):
-            if self._lower_keys[i] == lk:
+        for i in range(len(self._keys)):
+            if _eq_icase(self._keys[i], key):
                 return self._values[i]
         return ""
 
@@ -159,10 +181,9 @@ struct HeaderMap(Movable, Writable):
         Returns:
             All matching values; empty list if absent.
         """
-        var lk = _lower(key)
         var out = List[String]()
-        for i in range(len(self._lower_keys)):
-            if self._lower_keys[i] == lk:
+        for i in range(len(self._keys)):
+            if _eq_icase(self._keys[i], key):
                 out.append(self._values[i])
         return out^
 
@@ -175,9 +196,8 @@ struct HeaderMap(Movable, Writable):
         Returns:
             True if at least one entry with this key exists.
         """
-        var lk = _lower(key)
-        for i in range(len(self._lower_keys)):
-            if self._lower_keys[i] == lk:
+        for i in range(len(self._keys)):
+            if _eq_icase(self._keys[i], key):
                 return True
         return False
 
@@ -190,20 +210,16 @@ struct HeaderMap(Movable, Writable):
         Returns:
             True if at least one entry was removed.
         """
-        var lk = _lower(key)
         var new_keys = List[String]()
-        var new_lower = List[String]()
         var new_values = List[String]()
         var removed = False
-        for i in range(len(self._lower_keys)):
-            if self._lower_keys[i] == lk:
+        for i in range(len(self._keys)):
+            if _eq_icase(self._keys[i], key):
                 removed = True
             else:
                 new_keys.append(self._keys[i])
-                new_lower.append(self._lower_keys[i])
                 new_values.append(self._values[i])
         self._keys = new_keys^
-        self._lower_keys = new_lower^
         self._values = new_values^
         return removed
 
@@ -214,3 +230,24 @@ struct HeaderMap(Movable, Writable):
     def write_to[W: Writer](self, mut writer: W):
         for i in range(len(self._keys)):
             writer.write(self._keys[i], ": ", self._values[i], "\r\n")
+
+    def encode_to(self, mut buf: List[UInt8]):
+        """Serialise all headers as wire bytes into ``buf``.
+
+        Appends ``key: value\\r\\n`` for each header.
+        """
+        for i in range(len(self._keys)):
+            var k = self._keys[i]
+            var kp = k.unsafe_ptr()
+            var kn = k.byte_length()
+            for j in range(kn):
+                buf.append(kp[j])
+            buf.append(58)
+            buf.append(32)
+            var v = self._values[i]
+            var vp = v.unsafe_ptr()
+            var vn = v.byte_length()
+            for j in range(vn):
+                buf.append(vp[j])
+            buf.append(13)
+            buf.append(10)

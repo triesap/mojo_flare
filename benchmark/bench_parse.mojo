@@ -32,7 +32,7 @@ from flare.dns import resolve, resolve_v4
 # ── IpAddr.parse throughput ───────────────────────────────────────────────────
 
 
-def bench_ip_parse_v4(mut b: Bencher) capturing:
+def bench_ip_parse_v4(mut b: Bencher) capturing raises:
     """Measure IpAddr.parse() throughput for an IPv4 string."""
 
     @parameter
@@ -45,7 +45,7 @@ def bench_ip_parse_v4(mut b: Bencher) capturing:
     b.iter[call_fn]()
 
 
-def bench_ip_parse_v6(mut b: Bencher) capturing:
+def bench_ip_parse_v6(mut b: Bencher) capturing raises:
     """Measure IpAddr.parse() throughput for an IPv6 string."""
 
     @parameter
@@ -57,7 +57,7 @@ def bench_ip_parse_v6(mut b: Bencher) capturing:
     b.iter[call_fn]()
 
 
-def bench_ip_parse_v4_broadcast(mut b: Bencher) capturing:
+def bench_ip_parse_v4_broadcast(mut b: Bencher) capturing raises:
     """Measure IpAddr.parse() for the broadcast address (worst-case dotted-decimal).
     """
 
@@ -73,7 +73,7 @@ def bench_ip_parse_v4_broadcast(mut b: Bencher) capturing:
 # ── SocketAddr.parse throughput ───────────────────────────────────────────────
 
 
-def bench_socket_addr_parse(mut b: Bencher) capturing:
+def bench_socket_addr_parse(mut b: Bencher) capturing raises:
     """Measure SocketAddr.parse() throughput for '1.2.3.4:8080'."""
 
     @parameter
@@ -85,7 +85,7 @@ def bench_socket_addr_parse(mut b: Bencher) capturing:
     b.iter[call_fn]()
 
 
-def bench_socket_addr_parse_ipv6(mut b: Bencher) capturing:
+def bench_socket_addr_parse_ipv6(mut b: Bencher) capturing raises:
     """Measure SocketAddr.parse() throughput for '[::1]:443'."""
 
     @parameter
@@ -100,7 +100,7 @@ def bench_socket_addr_parse_ipv6(mut b: Bencher) capturing:
 # ── IpAddr construction (no parsing) ─────────────────────────────────────────
 
 
-def bench_ip_localhost(mut b: Bencher) capturing:
+def bench_ip_localhost(mut b: Bencher) capturing raises:
     """Measure IpAddr.localhost() construction — pure struct init, no FFI."""
 
     @parameter
@@ -115,7 +115,7 @@ def bench_ip_localhost(mut b: Bencher) capturing:
 # ── DNS resolution latency ────────────────────────────────────────────────────
 
 
-def bench_dns_resolve_localhost(mut b: Bencher) capturing:
+def bench_dns_resolve_localhost(mut b: Bencher) capturing raises:
     """Measure resolve('localhost') round-trip latency including getaddrinfo(3).
     """
 
@@ -128,7 +128,7 @@ def bench_dns_resolve_localhost(mut b: Bencher) capturing:
     b.iter[call_fn]()
 
 
-def bench_dns_resolve_v4_localhost(mut b: Bencher) capturing:
+def bench_dns_resolve_v4_localhost(mut b: Bencher) capturing raises:
     """Measure resolve_v4('localhost') latency (IPv4-only filter)."""
 
     @parameter

@@ -114,9 +114,7 @@ def len_consistency(data: List[UInt8]) raises -> Bool:
         except:
             pass  # injection error is fine
 
-        # Lengths must always match
-        if h._keys.__len__() != h._lower_keys.__len__():
-            return False
+        # Key and value lists must always have matching lengths
         if h._keys.__len__() != h._values.__len__():
             return False
         i += chunk
