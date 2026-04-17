@@ -25,7 +25,7 @@ mojo             = "<1.0"
 openssl          = ">=3.6.1,<4"    # TLS: libssl + libcrypto (SHA-1 for WS handshake)
 ca-certificates  = ">=2025.1.31"   # TLS default CA bundle → $CONDA_PREFIX/ssl/cacert.pem
 zlib             = ">=1.3.1,<2"    # HTTP: Content-Encoding gzip/deflate decompression
-json             = { git = "https://github.com/ehsanmok/json.git", tag = "v0.1.0" }
+json             = { git = "https://github.com/ehsanmok/json.git", branch = "main" }
 
 [feature.dev.dependencies]
 gxx        = ">=13"           # g++ for Linux (macOS uses system clang++ from Xcode CLT)
@@ -33,7 +33,7 @@ pre-commit = ">=4.2.0,<5"
 mojodoc    = { git = "https://github.com/ehsanmok/mojodoc.git", branch = "main" }
 
 [feature.fuzz.dependencies]
-mozz = { git = "https://github.com/ehsanmok/mozz.git", tag = "v0.1.0" }
+mozz = { git = "https://github.com/ehsanmok/mozz.git", branch = "main" }
 
 [feature.fuzz.tasks]
 # ── Fuzzing (mozz) ────────────────────────────────────────────────────────────
