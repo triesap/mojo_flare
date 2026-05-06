@@ -116,7 +116,7 @@ def fork_server(
 
 
 def fork_server[
-    H: Handler & Copyable
+    H: Handler
 ](
     var srv: HttpServer,
     var handler: H,
@@ -127,11 +127,13 @@ def fork_server[
     Identical semantics to the bare-function overload; this one
     exists so ``Router``, ``App[S]``, middleware wrappers, and
     user-defined ``Handler`` structs can flow through the helper
-    without an ``FnHandler`` shim.
+    without an ``FnHandler`` shim. ``Copyable`` is *not* required
+    -- the child process runs the single-worker ``HttpServer.serve``
+    path, which only needs ``Handler``.
 
     Args:
         srv: A bound ``HttpServer``. Moved into the child.
-        handler: Any ``Handler & Copyable`` struct.
+        handler: Any ``Handler`` struct.
         startup_us: Parent-side startup sleep (microseconds).
 
     Returns:

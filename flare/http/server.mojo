@@ -341,28 +341,73 @@ struct HttpServer(Movable):
         else:
             self._serve_multicore[FnHandler](h^, num_workers, pin_cores)
 
+    def serve[H: Handler](mut self, var handler: H) raises:
+        """Run the single-worker reactor loop with any ``Handler``.
+
+        The arity-1 overload that accepts ``Handler``-only types
+        without requiring ``Copyable``. This is the right entry
+        point for ``Router`` (which carries heap-allocated boxed
+        struct handlers and isn't safely Copyable yet -- see the
+        v0.7.x roadmap), middleware-wrapping handler chains
+        whose innermost element is a ``Router``, or any other
+        ``Handler``-only struct.
+
+        For multi-worker mode (``num_workers >= 2``), the handler
+        type must be ``Copyable`` because each worker gets its
+        own ``H.copy()``. Use the parametric ``serve[H: Handler &
+        Copyable](handler, num_workers, pin_cores)`` overload
+        below for that.
+
+        Args:
+            handler: The request handler (ownership transferred).
+
+        Raises:
+            NetworkError: On fatal listener errors; per-connection
+                errors close the offending connection silently.
+        """
+        from ._server_reactor_impl import run_uring_bufring_reactor_loop
+        from ._unified_reactor_impl import run_unified_reactor_loop
+        from flare.runtime.uring_reactor import use_uring_backend
+        from std.os import getenv
+        from std.sys.info import CompilationTarget
+
+        self._stopping = False
+        comptime if CompilationTarget.is_linux():
+            if use_uring_backend() and getenv("FLARE_BUFRING_HANDLER") == "1":
+                run_uring_bufring_reactor_loop[H](
+                    self._listener, self.config, handler, self._stopping
+                )
+                return
+        run_unified_reactor_loop(
+            self._listener,
+            self.config,
+            self.h2_config.copy(),
+            handler,
+            self._stopping,
+        )
+
     def serve[
         H: Handler & Copyable
     ](
         mut self,
         var handler: H,
-        num_workers: Int = 1,
+        num_workers: Int,
         pin_cores: Bool = True,
     ) raises:
-        """Run the reactor loop with a ``Handler``.
+        """Run the multi-worker reactor loop with a ``Copyable Handler``.
 
-        This is the unified entry point. Any struct implementing
-        ``Handler & Copyable`` works: ``Router``, middleware wrappers,
-        stateful user handlers, ``App[S, H]``, or a bare ``FnHandler``.
+        Each worker gets its own ``H.copy()`` and runs an independent
+        reactor on its own thread; they share a single listener fd
+        via ``flare.runtime.scheduler.Scheduler``. ``Copyable`` is
+        required here because of the per-worker copy.
 
-        - ``num_workers == 1`` (default): single-threaded reactor.
-          ``run_reactor_loop`` runs directly on the current thread,
-          no pthreads.
+        - ``num_workers == 1``: routed back to the single-worker
+          overload; this overload's ``Copyable`` constraint is
+          stricter than necessary but the dispatch is still
+          correct.
         - ``num_workers >= 2``: multicore — N ``pthread`` workers
           sharing a single listener fd via
           ``flare.runtime.scheduler.Scheduler``.
-          ``Copyable`` is required here because each worker gets its
-          own ``H.copy()``.
 
         Args:
             handler: The request handler (ownership transferred).

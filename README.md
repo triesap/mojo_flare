@@ -23,7 +23,7 @@ def main() raises:
     var r = Router()
     r.get("/", hello)
     var srv = HttpServer.bind(SocketAddr.localhost(8080))
-    srv.serve(r^, num_workers=4)
+    srv.serve(r^)                                       # single-worker; for multi-worker pass a Copyable handler + num_workers=N
 ```
 
 ## Why flare
@@ -86,8 +86,10 @@ def main() raises:
     r.get("/health",     health)
 
     var srv = HttpServer.bind(SocketAddr.localhost(8080))
-    srv.serve(r^, num_workers=4)
+    srv.serve(r^)
 ```
+
+The single-worker `srv.serve(r^)` shape works with any `Handler` (including `Router`). For multi-worker mode (`num_workers=N`) the handler must be `Copyable` because each worker gets its own `H.copy()`; pass a bare-function handler (`srv.serve(my_fn, num_workers=4)`) or a `ComptimeRouter[ROUTES]` (the comptime route table is `Copyable`). Wrapping a `Router` for multi-worker is a v0.7.x roadmap item.
 
 `flare.prelude` re-exports the everyday handler surface — `Request`, `Response`, `Router`, `HttpServer`, `ok` / `ok_json` / `ok_json_value` / `not_found` / `bad_request` / `internal_error` / `redirect`, `Method` / `Status`, the `Handler` family, `SocketAddr`. Anything outside that set (typed extractors, middleware, sessions, cookies, forms, comptime routing, HTTP/2 internals, lower-level transports) stays as an explicit `from flare.http import ...` so the import block continues to document what each module reaches for. For the very first hello-world up at the top of this README we kept the explicit import to show which names are in play; everywhere else the prelude is enough.
 
