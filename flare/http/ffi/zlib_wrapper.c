@@ -121,6 +121,52 @@ int flare_compress_gzip(const void *in_buf, int in_len,
 }
 
 /**
+ * Compress ``in_len`` bytes from ``in_buf`` as a *raw* deflate stream
+ * (no zlib or gzip header).  Used by RFC 7692 ``permessage-deflate``:
+ * each WebSocket message is encoded as a raw deflate block, the
+ * trailing 0x00 0x00 0xff 0xff sync marker is stripped by the
+ * caller, and the receiving side restores the marker before
+ * inflating.
+ *
+ * Always uses ``Z_SYNC_FLUSH`` so the output ends with the empty
+ * deflate block (0x00 0x00 0xff 0xff).  Callers MUST drop those 4
+ * bytes per RFC 7692 §7.2.1.
+ *
+ * @param in_buf   Pointer to the plaintext input bytes.
+ * @param in_len   Number of plaintext input bytes.
+ * @param out_buf  Pointer to the output buffer (pre-allocated).
+ * @param out_cap  Size of the output buffer in bytes.
+ * @param level    Compression level (1-9; 0 = no compression; -1 = default).
+ * @return Number of bytes written on success; negative zlib error otherwise.
+ */
+int flare_compress_raw_deflate(const void *in_buf, int in_len,
+                               void *out_buf, int out_cap,
+                               int level) {
+    z_stream strm;
+    memset(&strm, 0, sizeof(z_stream));
+
+    /* windowBits = -15 -> raw deflate (no zlib/gzip wrapper). */
+    int rc = deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY);
+    if (rc != Z_OK) return rc;
+
+    strm.next_in   = (Bytef *)in_buf;
+    strm.avail_in  = (uInt)in_len;
+    strm.next_out  = (Bytef *)out_buf;
+    strm.avail_out = (uInt)out_cap;
+
+    /* Z_SYNC_FLUSH ensures the output ends with 0x00 0x00 0xff 0xff
+       so the caller can strip the marker per RFC 7692 §7.2.1. */
+    rc = deflate(&strm, Z_SYNC_FLUSH);
+    int written = out_cap - (int)strm.avail_out;
+    deflateEnd(&strm);
+
+    if (rc == Z_OK || rc == Z_STREAM_END || rc == Z_BUF_ERROR) {
+        return written;
+    }
+    return rc;
+}
+
+/**
  * Return the size of z_stream in bytes (for diagnostics).
  */
 int flare_zstream_size(void) {

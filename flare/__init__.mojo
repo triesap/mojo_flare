@@ -766,6 +766,18 @@ from .ws.client import WsClient, WsHandshakeError, WsMessage
 from .ws.server import WsServer
 from .ws.frame import WsFrame, WsOpcode, WsCloseCode, WsProtocolError
 from .ws.client_h2 import WsOverH2Stream, bootstrap_ws_over_h2
+from .ws.permessage_deflate import (
+    PermessageDeflateConfig,
+    compress_message,
+    decompress_message,
+)
+from .ws.extensions import (
+    ExtensionOffer,
+    ExtensionParameter,
+    parse_extensions,
+    build_permessage_deflate_offer,
+    negotiate_permessage_deflate,
+)
 
 # flare.io
 from .io.buf_reader import Readable, BufReader

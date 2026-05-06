@@ -89,6 +89,7 @@ ASAN_TESTS=(
   "tests/test_tls_server_ffi.mojo"           # ServerCtx FFI (11 borrow helpers)
   "tests/test_tls_resume.mojo"               # v0.7 TLS resumption: TlsSession lifetime + new_session_cb
   "tests/test_ws.mojo"                       # SHA-1 FFI via compute_accept_key
+  "tests/test_ws_permessage_deflate.mojo"    # v0.7 — RFC 7692 codec (raw deflate / inflate FFI borrow)
 )
 TSAN_TESTS=(
   # Multicore + reactor (the only places we spawn pthreads)

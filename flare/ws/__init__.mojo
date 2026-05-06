@@ -65,3 +65,16 @@ def main() raises:
 from .frame import WsFrame, WsOpcode, WsCloseCode, WsProtocolError
 from .client import WsClient, WsHandshakeError, WsMessage
 from .server import WsServer, WsConnection
+from .client_h2 import WsOverH2Stream, bootstrap_ws_over_h2
+from .extensions import (
+    ExtensionOffer,
+    ExtensionParameter,
+    parse_extensions,
+    build_permessage_deflate_offer,
+    negotiate_permessage_deflate,
+)
+from .permessage_deflate import (
+    PermessageDeflateConfig,
+    compress_message,
+    decompress_message,
+)
