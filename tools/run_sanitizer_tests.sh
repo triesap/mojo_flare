@@ -73,6 +73,21 @@ ASAN_TESTS=(
   "tests/test_unified_http_client.mojo"      # HttpClient h2c + auth FFI
   "tests/test_h2_server_handler.mojo"        # HttpClient(prefer_h2c=True) <-> HttpServer
   "tests/test_h2_extended_connect.mojo"      # RFC 8441 SETTINGS/parse (in-memory)
+  # OwnedDLHandle borrow-helper discipline (post v0.7 b20951e). Each
+  # of these tests exercises an FFI surface that was just refactored
+  # to route every ``OwnedDLHandle.get_function`` + invocation through
+  # a ``read lib`` borrow helper; ASan validates the lifetime fix
+  # holds up under sanitizer instrumentation (no use-after-free in
+  # the dlclose-on-ASAP-destruction path the legacy pattern was
+  # vulnerable to). Verified clean during the b20951e gate; baking
+  # them into the canonical inventory so future contributors get the
+  # coverage by default.
+  "tests/test_hmac.mojo"                     # crypto FFI -- HMAC-SHA256 borrow helpers
+  "tests/test_session.mojo"                  # signed-cookie path through HMAC FFI
+  "tests/test_tls.mojo"                      # TLS client FFI (17 borrow helpers)
+  "tests/test_tls_acceptor.mojo"             # TLS server FFI (TlsAcceptor over OpenSSL)
+  "tests/test_tls_server_ffi.mojo"           # ServerCtx FFI (11 borrow helpers)
+  "tests/test_ws.mojo"                       # SHA-1 FFI via compute_accept_key
 )
 TSAN_TESTS=(
   # Multicore + reactor (the only places we spawn pthreads)
