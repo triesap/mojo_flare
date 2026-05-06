@@ -327,9 +327,10 @@ shared listener (it's a config knob) would close the gap.
 ### Same-host head-to-head (dev-box, current code)
 
 The cross-framework table above is the historical CPU-pinned
-reference run ([`benchmark/results/throughput_mc-vs-rust/`](../benchmark/results/throughput_mc-vs-rust))
-on the v0.6.0 release-tagged baselines. The numbers in the
-README headline come from a fresh **same-host head-to-head**
+reference run on the v0.6.0 release-tagged baselines (raw run
+data not tracked in the repo; reproduce locally via the harness
+below). The numbers in the README headline come from a fresh
+**same-host head-to-head**
 on the dev-box (also EPYC 7R32, separate AWS instance, no
 CPU pinning) against the current code. Each row is measured
 at its **peak-sustainable rate** -- the harness's calibrated-
@@ -522,8 +523,10 @@ The improvements above are five concrete code changes:
 live under [`benchmark/baselines/`](../benchmark/baselines), pinned
 via `Cargo.lock` (Rust frameworks), conda-forge `nginx 1.25` and
 `go 1.24`. Raw run data (env, integrity gate, per-target JSON, raw
-wrk2 stdout) is at
-[`benchmark/results/throughput_mc-vs-rust/`](../benchmark/results/throughput_mc-vs-rust).
+wrk2 stdout) lands under `benchmark/results/<timestamp>-<host>-<commit>/`
+when you reproduce locally; results aren't tracked in the repo
+(except for the v0.6 archived numbers under
+[`benchmark/results/v0.6/`](../benchmark/results/v0.6)).
 
 Reproduce on a Linux box with ≥ 8 physical cores:
 
