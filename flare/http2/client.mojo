@@ -192,6 +192,14 @@ struct Http2ClientConfig(Copyable, Defaultable, Movable):
     var max_header_list_size: Int
     var allow_huffman_decode: Bool
     var allow_huffman_encode: Bool
+    var enable_connect_protocol: Bool
+    """RFC 8441 ``SETTINGS_ENABLE_CONNECT_PROTOCOL`` (id=0x8). When
+    ``True`` the client advertises support for receiving the
+    ``:protocol`` pseudo-header on inbound CONNECT responses, AND
+    is willing to issue Extended CONNECT requests itself once the
+    peer ACKs the same SETTINGS bit. Defaults to ``False`` --
+    enabled only when the high-level facade (e.g. WS-over-h2)
+    needs the extension."""
 
     def __init__(out self):
         self.initial_window_size = _DEFAULT_CLIENT_INITIAL_WINDOW_SIZE
@@ -200,6 +208,7 @@ struct Http2ClientConfig(Copyable, Defaultable, Movable):
         self.max_header_list_size = _DEFAULT_CLIENT_MAX_HEADER_LIST_SIZE
         self.allow_huffman_decode = False
         self.allow_huffman_encode = False
+        self.enable_connect_protocol = False
 
     def validate(self) raises -> None:
         """Raise if any field violates the RFC 9113 / RFC 7541 bounds.
@@ -414,6 +423,7 @@ struct Http2ClientConnection(Defaultable, Movable):
         out.conn.hpack_decoder.max_size = out.config.header_table_size
         out.conn.hpack_decoder.allow_huffman = out.config.allow_huffman_decode
         out.conn.hpack_encoder.allow_huffman = out.config.allow_huffman_encode
+        out.conn.enable_connect_protocol = out.config.enable_connect_protocol
         # Re-emit preface + SETTINGS into a fresh outbox now that
         # ``config`` has been applied. The default-constructed
         # outbox already holds the *unconfigured* defaults, but
@@ -466,6 +476,12 @@ struct Http2ClientConnection(Defaultable, Movable):
         # SETTINGS_MAX_HEADER_LIST_SIZE = 0x6 (only when set)
         if self.config.max_header_list_size > 0:
             self._append_setting(p, 0x6, self.config.max_header_list_size)
+        # SETTINGS_ENABLE_CONNECT_PROTOCOL = 0x8 (RFC 8441 §3).
+        # We only emit when on -- the protocol default is 0, so an
+        # absent pair is interpreted as "client does not support
+        # Extended CONNECT" (which is the safe fallback).
+        if self.config.enable_connect_protocol:
+            self._append_setting(p, 0x8, 1)
         f.payload = p^
         f.header.length = len(f.payload)
         var bytes = encode_frame(f^)
@@ -754,6 +770,152 @@ struct Http2ClientConnection(Defaultable, Movable):
                 self.conn.streams[sid] = s_local^
                 pos += chunk
 
+    def send_extended_connect(
+        mut self,
+        sid: Int,
+        scheme: String,
+        authority: String,
+        path: String,
+        protocol: String,
+        extra_headers: List[HpackHeader],
+    ) raises -> None:
+        """Open an RFC 8441 Extended CONNECT stream.
+
+        Emits a HEADERS frame with the Extended-CONNECT pseudo-header
+        set (``:method = CONNECT, :scheme, :authority, :path,
+        :protocol``) **without** ``END_STREAM``. The stream stays in
+        OPEN state so the caller can pump bidirectional DATA frames
+        (e.g. WebSocket frames over h2 -- ``protocol="websocket"``).
+
+        The peer MUST have advertised
+        ``SETTINGS_ENABLE_CONNECT_PROTOCOL=1`` (RFC 8441 §3) before
+        the caller invokes this; gate the call on
+        :meth:`peer_supports_extended_connect`. The driver does NOT
+        block here -- callers may pre-stage the frame and the peer
+        may have already ACKed our SETTINGS by the time the bytes
+        are flushed.
+
+        Args:
+            sid: Stream id allocated via :meth:`next_stream_id`.
+            scheme: ``"http"`` or ``"https"`` per RFC 8441 §4.
+            authority: ``Host``-equivalent.
+            path: Request target.
+            protocol: Tunnelled protocol token, e.g. ``"websocket"``.
+            extra_headers: Caller-supplied headers (lowercased).
+        """
+        var hh = List[HpackHeader]()
+        hh.append(HpackHeader(":method", "CONNECT"))
+        hh.append(HpackHeader(":scheme", scheme))
+        hh.append(HpackHeader(":authority", authority))
+        hh.append(HpackHeader(":path", path))
+        hh.append(HpackHeader(":protocol", protocol))
+        for i in range(len(extra_headers)):
+            hh.append(extra_headers[i].copy())
+        var enc = self.conn.hpack_encoder.encode(Span[HpackHeader, _](hh))
+        var hf = Frame()
+        hf.header.type = FrameType.HEADERS()
+        hf.header.stream_id = sid
+        # Extended CONNECT: NO END_STREAM (the stream stays open).
+        hf.header.flags = FrameFlags(FrameFlags.END_HEADERS())
+        hf.payload = enc^
+        hf.header.length = len(hf.payload)
+        var hb = encode_frame(hf^)
+        for i in range(len(hb)):
+            self.outbox.append(hb[i])
+        var s = Stream()
+        s.id = sid
+        s.send_window = self.conn.initial_window_size
+        s.recv_window = self.conn.initial_window_size
+        s.state = StreamState.OPEN()
+        self.conn.streams[sid] = s^
+
+    def send_data(
+        mut self,
+        sid: Int,
+        body: Span[UInt8, _],
+        end_stream: Bool,
+    ) raises -> None:
+        """Queue ``body`` as one or more DATA frames on stream ``sid``.
+
+        Used by tunnelling clients (Extended CONNECT bodies, or
+        chunked POSTs that need to be fed incrementally) where the
+        caller wants explicit control over ``END_STREAM`` placement.
+        Same flow-control accounting as the body-emission path of
+        :meth:`send_request`. Honours the negotiated send windows;
+        raises if the body wouldn't fit.
+        """
+        var n_body = len(body)
+        var max_frame = self.conn.max_frame_size
+        var pos = 0
+        if n_body == 0 and end_stream:
+            # Empty DATA with END_STREAM is the half-close marker.
+            var df = Frame()
+            df.header.type = FrameType.DATA()
+            df.header.stream_id = sid
+            df.header.flags = FrameFlags(FrameFlags.END_STREAM())
+            df.payload = List[UInt8]()
+            df.header.length = 0
+            var db = encode_frame(df^)
+            for i in range(len(db)):
+                self.outbox.append(db[i])
+            if sid in self.conn.streams:
+                var s_local = self.conn.streams[sid].copy()
+                s_local.state = StreamState.HALF_CLOSED_LOCAL()
+                self.conn.streams[sid] = s_local^
+            return
+        while pos < n_body:
+            var chunk = max_frame
+            if pos + chunk > n_body:
+                chunk = n_body - pos
+            var win = self.conn.send_window
+            if sid in self.conn.streams:
+                var sl = self.conn.streams[sid].copy()
+                if sl.send_window < win:
+                    win = sl.send_window
+            if chunk > win:
+                chunk = win
+            if chunk <= 0:
+                raise Error(
+                    "h2 client: send_data window exhausted; pending-body"
+                    " queue is a follow-up"
+                )
+            var df = Frame()
+            df.header.type = FrameType.DATA()
+            df.header.stream_id = sid
+            var is_last = pos + chunk == n_body
+            if is_last and end_stream:
+                df.header.flags = FrameFlags(FrameFlags.END_STREAM())
+            else:
+                df.header.flags = FrameFlags(UInt8(0))
+            var dp = List[UInt8](capacity=chunk)
+            for i in range(chunk):
+                dp.append(body[pos + i])
+            df.payload = dp^
+            df.header.length = len(df.payload)
+            var db = encode_frame(df^)
+            for i in range(len(db)):
+                self.outbox.append(db[i])
+            self.conn.send_window -= chunk
+            if sid in self.conn.streams:
+                var sl2 = self.conn.streams[sid].copy()
+                sl2.send_window -= chunk
+                if is_last and end_stream:
+                    sl2.state = StreamState.HALF_CLOSED_LOCAL()
+                self.conn.streams[sid] = sl2^
+            pos += chunk
+
+    def peer_supports_extended_connect(read self) -> Bool:
+        """Return ``True`` once the peer has advertised
+        ``SETTINGS_ENABLE_CONNECT_PROTOCOL = 1`` (RFC 8441 §3).
+
+        Latches on the first server-side SETTINGS that includes the
+        bit and never flips back -- RFC 9113 §6.5 forbids tearing
+        down an already-advertised SETTINGS value once peers have
+        acted on it. Callers should gate any
+        :meth:`send_extended_connect` call on this returning ``True``.
+        """
+        return self.conn.peer_enable_connect_protocol
+
     def send_goaway(mut self, last_stream_id: Int, error_code: Int = 0) -> None:
         """Queue a GOAWAY frame (RFC 9113 §6.8).
 
@@ -919,6 +1081,8 @@ def build_h2c_settings_payload(config: Http2ClientConfig) -> List[UInt8]:
         _append_setting_pair(p, 0x5, config.max_frame_size)
     if config.max_header_list_size > 0:
         _append_setting_pair(p, 0x6, config.max_header_list_size)
+    if config.enable_connect_protocol:
+        _append_setting_pair(p, 0x8, 1)
     return p^
 
 
