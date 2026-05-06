@@ -208,7 +208,7 @@ struct FnHandlerCT[F: def(Request) raises thin -> Response](Copyable, Handler):
         def hello(req: Request) raises -> Response:
             return ok("hello")
 
-        alias HelloHandler = FnHandlerCT[hello]
+        comptime HelloHandler = FnHandlerCT[hello]
 
         def main() raises:
             var h = HelloHandler()

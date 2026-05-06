@@ -39,7 +39,7 @@ from flare.http import (
 from flare.net import SocketAddr
 
 
-alias BENCH_CONFIG = ServerConfig(
+comptime BENCH_CONFIG = ServerConfig(
     idle_timeout_ms=0, write_timeout_ms=0, max_keepalive_requests=100_000
 )
 

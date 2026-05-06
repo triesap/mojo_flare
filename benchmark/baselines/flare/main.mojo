@@ -37,7 +37,7 @@ def handler(req: Request) raises -> Response:
 # then monomorphises the entire reactor loop against this specific
 # handler so the call site inside ``on_readable`` reduces to a direct
 # statically-known call to ``handler(req^)``.
-alias BenchHandler = FnHandlerCT[handler]
+comptime BenchHandler = FnHandlerCT[handler]
 
 
 def main() raises:

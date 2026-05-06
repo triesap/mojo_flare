@@ -41,14 +41,14 @@ def handler(req: Request) raises -> Response:
     return Response(status=404, reason="Not Found")
 
 
-alias BenchHandler = FnHandlerCT[handler]
+comptime BenchHandler = FnHandlerCT[handler]
 # skip_header_decode_for_short_requests=True opts into the
 # minimal parser that skips the per-request HeaderMap build
 # entirely. The handler() above only reads req.url, so the
 # headers can be left empty without affecting behaviour. Drops
 # the per-request HeaderMap allocation + per-header String
 # copies, which dominate the parser's CPU cost on TFB plaintext.
-alias BENCH_CONFIG = ServerConfig(
+comptime BENCH_CONFIG = ServerConfig(
     idle_timeout_ms=0,
     write_timeout_ms=0,
     max_keepalive_requests=100_000,
