@@ -13,7 +13,9 @@ driven via :class:`flare.http2.Http2ClientConnection` so we exchange
 real wire-format frames.
 """
 
-from std.ffi import c_int, c_uint, c_size_t, external_call
+from std.ffi import c_int, c_size_t, c_uint
+
+from flare.utils import usleep
 from std.memory import UnsafePointer, stack_allocation
 from std.testing import assert_equal, assert_true
 
@@ -116,7 +118,7 @@ def test_h2_conn_handle_get_round_trip() raises:
     var pump_attempts = 0
     while (not step_pump.want_write) and pump_attempts < 50:
         pump_attempts += 1
-        _ = external_call["usleep", c_int](c_int(2000))
+        usleep(2000)
         step_pump = handle.on_readable(h, cfg)
     assert_true(
         step_pump.want_write,

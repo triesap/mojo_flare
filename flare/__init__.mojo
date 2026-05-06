@@ -804,3 +804,8 @@ from .runtime.io_uring import (
     IoUringParams,
     is_io_uring_available,
 )
+
+# flare.utils -- cross-cutting helpers (POSIX FFI thunks for now).
+# Not re-exported at the top level: bare names like ``fork`` /
+# ``exit`` / ``kill`` would collide with builtins and other
+# imports. Pull them via ``from flare.utils import fork, ...``.

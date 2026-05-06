@@ -19,39 +19,20 @@ Cases (4):
   worker only in v0.7).
 """
 
-from std.ffi import c_int, external_call
 from std.testing import assert_equal, assert_true
+
+
+from flare.utils import (
+    SIGKILL,
+    exit,
+    fork,
+    kill,
+    usleep,
+    waitpid,
+)
 
 from flare.http import HttpClient, HttpServer, Request, Response, ok
 from flare.net import SocketAddr
-
-
-@always_inline
-def _fork() -> c_int:
-    return external_call["fork", c_int]()
-
-
-@always_inline
-def _waitpid(pid: c_int):
-    _ = external_call["waitpid", c_int](pid, 0, c_int(0))
-
-
-@always_inline
-def _exit_child(code: c_int = c_int(0)):
-    _ = external_call["_exit", c_int](code)
-
-
-@always_inline
-def _kill(pid: c_int, sig: c_int) -> c_int:
-    return external_call["kill", c_int](pid, sig)
-
-
-@always_inline
-def _usleep(us: c_int):
-    _ = external_call["usleep", c_int](us)
-
-
-comptime _SIGKILL: c_int = c_int(9)
 
 
 def _hello(req: Request) raises -> Response:
@@ -70,14 +51,14 @@ def test_bind_many_two_ports_serve_both() raises:
     var port_a = UInt16(srv.local_addrs()[0].port)
     var port_b = UInt16(srv.local_addrs()[1].port)
 
-    var pid = _fork()
+    var pid = fork()
     if pid == 0:
         try:
             srv.serve(_hello)
         except:
             pass
-        _exit_child()
-    _usleep(c_int(200000))
+        exit()
+    usleep(200000)
 
     var got_a = String("")
     var got_b = String("")
@@ -93,8 +74,8 @@ def test_bind_many_two_ports_serve_both() raises:
     except:
         raised = True
 
-    _ = _kill(pid, _SIGKILL)
-    _waitpid(pid)
+    _ = kill(pid, SIGKILL)
+    waitpid(pid)
 
     assert_true(not raised, "multi-listener round-trip raised")
     assert_equal(got_a, "hello multi-listener: /from-a")

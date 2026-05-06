@@ -31,10 +31,20 @@ Linux + io_uring-only; skipped on macOS or kernels that don't
 expose io_uring.
 """
 
-from std.ffi import c_int, c_uint, c_size_t, external_call
+from std.ffi import c_int, c_size_t, c_uint, external_call
 from std.memory import UnsafePointer, stack_allocation
 from std.sys.info import CompilationTarget
 from std.testing import assert_equal, assert_true, TestSuite
+
+
+from flare.utils import (
+    SIGKILL,
+    exit,
+    fork,
+    kill,
+    usleep,
+    waitpid,
+)
 
 from flare.http import (
     FnHandlerCT,
@@ -71,34 +81,6 @@ def _setenv(name: String, value: String, overwrite: c_int = c_int(1)) -> c_int:
 # ── POSIX shims (same shape as test_uring_serve_static.mojo) ────────────────
 
 
-@always_inline
-def _fork() -> c_int:
-    return external_call["fork", c_int]()
-
-
-@always_inline
-def _waitpid(pid: c_int):
-    _ = external_call["waitpid", c_int](pid, 0, c_int(0))
-
-
-@always_inline
-def _exit_child(code: c_int = c_int(0)):
-    _ = external_call["_exit", c_int](code)
-
-
-@always_inline
-def _usleep(us: c_int):
-    _ = external_call["usleep", c_int](us)
-
-
-@always_inline
-def _kill(pid: c_int, sig: c_int) -> c_int:
-    return external_call["kill", c_int](pid, sig)
-
-
-comptime _SIGKILL: c_int = c_int(9)
-
-
 # ── Loopback client helpers ──────────────────────────────────────────────────
 
 
@@ -133,7 +115,7 @@ def _connect_loopback(port: UInt16) raises -> c_int:
         if _connect(c, sa, c_uint(16)) >= c_int(0):
             return c
         _ = _close(c)
-        _usleep(c_int(20000))
+        usleep(20000)
     return c_int(-1)
 
 
@@ -208,15 +190,15 @@ def test_serve_handler_sequential_keepalive_churn() raises:
     var port = UInt16(srv.local_addr().port)
     assert_true(Int(port) > 0, "server must bind to a positive port")
 
-    var pid = _fork()
+    var pid = fork()
     if pid == 0:
         try:
             var h = _BenchHandler()
             srv.serve(h^)
         except:
             pass
-        _exit_child()
-    _usleep(c_int(80000))
+        exit()
+    usleep(80000)
 
     var req = String(
         "GET /plaintext HTTP/1.1\r\nHost: 127.0.0.1\r\n"
@@ -243,8 +225,8 @@ def test_serve_handler_sequential_keepalive_churn() raises:
             failed_at = c
             break
 
-    _ = _kill(pid, _SIGKILL)
-    _waitpid(pid)
+    _ = kill(pid, SIGKILL)
+    waitpid(pid)
 
     if skipped:
         # The forked child's io_uring bufring serve loop never
@@ -284,15 +266,15 @@ def test_serve_handler_concurrent_fanout() raises:
     var srv = HttpServer.bind(SocketAddr.localhost(0))
     var port = UInt16(srv.local_addr().port)
 
-    var server_pid = _fork()
+    var server_pid = fork()
     if server_pid == 0:
         try:
             var h = _BenchHandler()
             srv.serve(h^)
         except:
             pass
-        _exit_child()
-    _usleep(c_int(80000))
+        exit()
+    usleep(80000)
 
     var req = String(
         "GET /plaintext HTTP/1.1\r\nHost: 127.0.0.1\r\n"
@@ -305,8 +287,8 @@ def test_serve_handler_concurrent_fanout() raises:
     # rather than leaking 8 client children.
     var probe_fd = _connect_loopback(port)
     if Int(probe_fd) < 0:
-        _ = _kill(server_pid, _SIGKILL)
-        _waitpid(server_pid)
+        _ = kill(server_pid, SIGKILL)
+        waitpid(server_pid)
         print(
             "(skipped: io_uring bufring serve loop did not accept on this"
             " runner; keep io_uring opt-in until the runtime path"
@@ -320,32 +302,32 @@ def test_serve_handler_concurrent_fanout() raises:
     # exited 0 (success) or non-0 (failure).
     var nclients = 8
     var nreqs = 30
-    var client_pids = List[c_int]()
+    var client_pids = List[Int]()
     for k in range(nclients):
         _ = k
-        var cp = _fork()
+        var cp = fork()
         if cp == 0:
             # In each client child: open a conn, fire nreqs
             # requests, exit 0 on success / 1 on failure.
             try:
                 var fd = _connect_loopback(port)
                 if Int(fd) < 0:
-                    _exit_child(c_int(1))
+                    exit(1)
                 try:
                     for _ in range(nreqs):
                         _send_request_and_recv_response(fd, req, body)
                 finally:
                     _ = _close(fd)
-                _exit_child(c_int(0))
+                exit(0)
             except:
-                _exit_child(c_int(1))
+                exit(1)
         client_pids.append(cp)
 
     # Parent: wait for all client children. Use waitpid with the
     # specific pid; ignore exit status here (we'd need a status
     # word + WEXITSTATUS to read it cleanly via FFI).
     for i in range(len(client_pids)):
-        _waitpid(client_pids[i])
+        waitpid(client_pids[i])
 
     # Sanity: server should still be alive (the bug crashed it).
     # Send one more request through a fresh connection to confirm.
@@ -354,16 +336,16 @@ def test_serve_handler_concurrent_fanout() raises:
         # Server died mid-test (the bug we're guarding against),
         # OR the bufring path stopped accepting after the burst.
         # Either way, this is the failure signal.
-        _ = _kill(server_pid, _SIGKILL)
-        _waitpid(server_pid)
+        _ = kill(server_pid, SIGKILL)
+        waitpid(server_pid)
         raise Error("server stopped accepting after concurrent burst")
     try:
         _send_request_and_recv_response(fd, req, body)
     finally:
         _ = _close(fd)
 
-    _ = _kill(server_pid, _SIGKILL)
-    _waitpid(server_pid)
+    _ = kill(server_pid, SIGKILL)
+    waitpid(server_pid)
 
 
 # ── Test runner ──────────────────────────────────────────────────────────────

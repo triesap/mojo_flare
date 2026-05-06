@@ -19,8 +19,16 @@ Test certificates (tests/certs/):
 """
 
 from std.testing import assert_equal, assert_true, assert_false, TestSuite
-from std.ffi import OwnedDLHandle, c_int, external_call
+from std.ffi import OwnedDLHandle, c_int
 from std.memory import UnsafePointer, stack_allocation
+
+
+from flare.utils import (
+    exit,
+    fork,
+    usleep,
+    waitpid,
+)
 from flare.net.socket import _find_flare_lib
 from flare.tls import (
     TlsConfig,
@@ -36,33 +44,6 @@ from flare.tls import (
 comptime _CA_CRT: String = "tests/certs/ca.crt"
 comptime _SERVER_CRT: String = "tests/certs/server.crt"
 comptime _SERVER_KEY: String = "tests/certs/server.key"
-
-# ── POSIX helpers ─────────────────────────────────────────────────────────────
-
-
-@always_inline
-def _fork() -> c_int:
-    """Call ``fork(2)``."""
-    return external_call["fork", c_int]()
-
-
-@always_inline
-def _waitpid(pid: c_int):
-    """Wait for child ``pid`` to exit (ignores status)."""
-    # Pass 0 for the status pointer (WNOHANG=0 means wait indefinitely)
-    _ = external_call["waitpid", c_int](pid, 0, c_int(0))
-
-
-@always_inline
-def _exit_child():
-    """Call ``_exit(0)`` in the child — avoids Mojo atexit hooks."""
-    _ = external_call["_exit", c_int](c_int(0))
-
-
-@always_inline
-def _usleep(us: c_int):
-    """Sleep for ``us`` microseconds."""
-    _ = external_call["usleep", c_int](us)
 
 
 @always_inline
@@ -145,7 +126,7 @@ struct _TlsTestServer:
         _ = fn_echo(self._ptr)
 
 
-def _spawn_echo_server(server: _TlsTestServer) -> c_int:
+def _spawn_echo_server(server: _TlsTestServer) -> Int:
     """Fork a child that runs server.echo_once() then _exit(0).
 
     Args:
@@ -154,13 +135,13 @@ def _spawn_echo_server(server: _TlsTestServer) -> c_int:
     Returns:
         Child PID (parent), 0 (child — exits immediately after echo).
     """
-    var pid = _fork()
+    var pid = fork()
     if pid == 0:
         try:
             server.echo_once()
         except:
             pass
-        _exit_child()
+        exit()
     return pid
 
 
@@ -236,7 +217,7 @@ def test_tls_connect_valid_cert_succeeds() raises:
     assert_true(port > 0, "server port must be positive")
 
     var pid = _spawn_echo_server(srv)
-    _usleep(c_int(80000))  # 80ms for child to reach accept()
+    usleep(80000)  # 80ms for child to reach accept()
 
     try:
         var cfg = TlsConfig(ca_bundle=_CA_CRT)
@@ -246,7 +227,7 @@ def test_tls_connect_valid_cert_succeeds() raises:
     except e:
         assert_true(False, "Expected success, got: " + String(e))
 
-    _waitpid(pid)
+    waitpid(pid)
 
 
 def test_tls_connect_insecure_succeeds() raises:
@@ -255,7 +236,7 @@ def test_tls_connect_insecure_succeeds() raises:
     var port = srv.port()
 
     var pid = _spawn_echo_server(srv)
-    _usleep(c_int(80000))
+    usleep(80000)
 
     try:
         var cfg = TlsConfig.insecure()
@@ -265,7 +246,7 @@ def test_tls_connect_insecure_succeeds() raises:
     except e:
         assert_true(False, "Expected insecure success, got: " + String(e))
 
-    _waitpid(pid)
+    waitpid(pid)
 
 
 def test_tls_connect_wrong_ca_raises() raises:
@@ -274,7 +255,7 @@ def test_tls_connect_wrong_ca_raises() raises:
     var port = srv.port()
 
     var pid = _spawn_echo_server(srv)
-    _usleep(c_int(80000))
+    usleep(80000)
 
     var raised = False
     try:
@@ -286,7 +267,7 @@ def test_tls_connect_wrong_ca_raises() raises:
         raised = True  # any TLS error is correct here
 
     assert_true(raised, "Expected certificate error with wrong CA")
-    _waitpid(pid)
+    waitpid(pid)
 
 
 def test_tls_version_is_12_or_13() raises:
@@ -295,7 +276,7 @@ def test_tls_version_is_12_or_13() raises:
     var port = srv.port()
 
     var pid = _spawn_echo_server(srv)
-    _usleep(c_int(80000))
+    usleep(80000)
 
     try:
         var cfg = TlsConfig(ca_bundle=_CA_CRT)
@@ -309,7 +290,7 @@ def test_tls_version_is_12_or_13() raises:
     except e:
         assert_true(False, "TLS version error: " + String(e))
 
-    _waitpid(pid)
+    waitpid(pid)
 
 
 def test_tls_cipher_suite_is_forward_secret() raises:
@@ -318,7 +299,7 @@ def test_tls_cipher_suite_is_forward_secret() raises:
     var port = srv.port()
 
     var pid = _spawn_echo_server(srv)
-    _usleep(c_int(80000))
+    usleep(80000)
 
     try:
         var cfg = TlsConfig(ca_bundle=_CA_CRT)
@@ -335,7 +316,7 @@ def test_tls_cipher_suite_is_forward_secret() raises:
     except e:
         assert_true(False, "Cipher test error: " + String(e))
 
-    _waitpid(pid)
+    waitpid(pid)
 
 
 def test_tls_peer_cert_subject_non_empty() raises:
@@ -344,7 +325,7 @@ def test_tls_peer_cert_subject_non_empty() raises:
     var port = srv.port()
 
     var pid = _spawn_echo_server(srv)
-    _usleep(c_int(80000))
+    usleep(80000)
 
     try:
         var cfg = TlsConfig(ca_bundle=_CA_CRT)
@@ -358,7 +339,7 @@ def test_tls_peer_cert_subject_non_empty() raises:
     except e:
         assert_true(False, "Cert subject error: " + String(e))
 
-    _waitpid(pid)
+    waitpid(pid)
 
 
 def test_tls_write_read_echo() raises:
@@ -367,7 +348,7 @@ def test_tls_write_read_echo() raises:
     var port = srv.port()
 
     var pid = _spawn_echo_server(srv)
-    _usleep(c_int(80000))
+    usleep(80000)
 
     try:
         var cfg = TlsConfig(ca_bundle=_CA_CRT)
@@ -384,7 +365,7 @@ def test_tls_write_read_echo() raises:
     except e:
         assert_true(False, "Write/echo error: " + String(e))
 
-    _waitpid(pid)
+    waitpid(pid)
 
 
 def test_tls_close_idempotent() raises:
@@ -393,7 +374,7 @@ def test_tls_close_idempotent() raises:
     var port = srv.port()
 
     var pid = _spawn_echo_server(srv)
-    _usleep(c_int(80000))
+    usleep(80000)
 
     try:
         var cfg = TlsConfig(ca_bundle=_CA_CRT)
@@ -404,7 +385,7 @@ def test_tls_close_idempotent() raises:
     except e:
         assert_true(False, "close() idempotency error: " + String(e))
 
-    _waitpid(pid)
+    waitpid(pid)
 
 
 def main() raises:

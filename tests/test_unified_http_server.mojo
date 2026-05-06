@@ -19,9 +19,19 @@ fork a child running ``HttpServer.serve(handler)``, drive both
 client variants from the parent, SIGKILL on test-end.
 """
 
-from std.ffi import c_int, c_size_t, external_call
+from std.ffi import c_int, c_size_t
 from std.memory import stack_allocation
 from std.testing import assert_equal, assert_true
+
+
+from flare.utils import (
+    SIGKILL,
+    exit,
+    fork,
+    kill,
+    usleep,
+    waitpid,
+)
 
 from flare.http import HttpClient, HttpServer, Request, Response, ok
 from flare.net import SocketAddr
@@ -38,34 +48,6 @@ from flare.net._libc import (
     _strerror,
     get_errno,
 )
-
-
-@always_inline
-def _fork() -> c_int:
-    return external_call["fork", c_int]()
-
-
-@always_inline
-def _waitpid(pid: c_int):
-    _ = external_call["waitpid", c_int](pid, 0, c_int(0))
-
-
-@always_inline
-def _exit_child(code: c_int = c_int(0)):
-    _ = external_call["_exit", c_int](code)
-
-
-@always_inline
-def _kill(pid: c_int, sig: c_int) -> c_int:
-    return external_call["kill", c_int](pid, sig)
-
-
-@always_inline
-def _usleep(us: c_int):
-    _ = external_call["usleep", c_int](us)
-
-
-comptime _SIGKILL: c_int = c_int(9)
 
 
 def _connect_loopback(port: UInt16) raises -> c_int:
@@ -99,14 +81,14 @@ def test_unified_server_http1_request() raises:
     var srv = HttpServer.bind(SocketAddr.localhost(0))
     var port = UInt16(srv.local_addr().port)
 
-    var pid = _fork()
+    var pid = fork()
     if pid == 0:
         try:
             srv.serve(_hello)
         except:
             pass
-        _exit_child()
-    _usleep(c_int(200000))
+        exit()
+    usleep(200000)
 
     var raised = False
     var got = String("")
@@ -137,8 +119,8 @@ def test_unified_server_http1_request() raises:
     except:
         raised = True
 
-    _ = _kill(pid, _SIGKILL)
-    _waitpid(pid)
+    _ = kill(pid, SIGKILL)
+    waitpid(pid)
     assert_true(not raised, "HTTP/1.1 round-trip raised")
     assert_true(
         "hello unified" in got, "HTTP/1.1 response missing body; got: " + got
@@ -151,14 +133,14 @@ def test_unified_server_http2_request() raises:
     var srv = HttpServer.bind(SocketAddr.localhost(0))
     var port = UInt16(srv.local_addr().port)
 
-    var pid = _fork()
+    var pid = fork()
     if pid == 0:
         try:
             srv.serve(_hello)
         except:
             pass
-        _exit_child()
-    _usleep(c_int(200000))
+        exit()
+    usleep(200000)
 
     var url = String("http://127.0.0.1:") + String(Int(port)) + String("/")
     var got_status = -1
@@ -172,8 +154,8 @@ def test_unified_server_http2_request() raises:
     except:
         raised = True
 
-    _ = _kill(pid, _SIGKILL)
-    _waitpid(pid)
+    _ = kill(pid, SIGKILL)
+    waitpid(pid)
     assert_true(not raised, "HTTP/2 round-trip raised")
     assert_equal(got_status, 200)
     assert_equal(got_body, "hello unified")
@@ -198,14 +180,14 @@ def test_unified_server_router_dispatch_both_protocols() raises:
     var srv = HttpServer.bind(SocketAddr.localhost(0))
     var port = UInt16(srv.local_addr().port)
 
-    var pid = _fork()
+    var pid = fork()
     if pid == 0:
         try:
             srv.serve(_by_path_dispatcher)
         except:
             pass
-        _exit_child()
-    _usleep(c_int(200000))
+        exit()
+    usleep(200000)
 
     # HTTP/2: hit /a then /b on the same client.
     var base = String("http://127.0.0.1:") + String(Int(port))
@@ -245,8 +227,8 @@ def test_unified_server_router_dispatch_both_protocols() raises:
     except:
         pass
 
-    _ = _kill(pid, _SIGKILL)
-    _waitpid(pid)
+    _ = kill(pid, SIGKILL)
+    waitpid(pid)
     assert_equal(got_a, "route-a-body")
     assert_equal(got_b, "route-b-body")
     assert_true("route-a-body" in got_a_h1)

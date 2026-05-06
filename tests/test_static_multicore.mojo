@@ -28,10 +28,20 @@ Cross-platform: works on Linux + macOS (no io_uring dependency;
 the static fast path lives in the epoll/kqueue reactor).
 """
 
-from std.ffi import c_int, c_uint, c_size_t, external_call
+from std.ffi import c_int, c_size_t, c_uint
 from std.memory import UnsafePointer, stack_allocation
 from std.sys.info import CompilationTarget
 from std.testing import assert_equal, assert_true, TestSuite
+
+
+from flare.utils import (
+    SIGKILL,
+    exit,
+    fork,
+    kill,
+    usleep,
+    waitpid,
+)
 
 from flare.http import (
     HttpServer,
@@ -56,34 +66,6 @@ from flare.net._libc import (
 
 
 # ── POSIX shims (same shape as test_uring_serve_handler.mojo) ──────────────
-
-
-@always_inline
-def _fork() -> c_int:
-    return external_call["fork", c_int]()
-
-
-@always_inline
-def _waitpid(pid: c_int):
-    _ = external_call["waitpid", c_int](pid, 0, c_int(0))
-
-
-@always_inline
-def _exit_child(code: c_int = c_int(0)):
-    _ = external_call["_exit", c_int](code)
-
-
-@always_inline
-def _usleep(us: c_int):
-    _ = external_call["usleep", c_int](us)
-
-
-@always_inline
-def _kill(pid: c_int, sig: c_int) -> c_int:
-    return external_call["kill", c_int](pid, sig)
-
-
-comptime _SIGKILL: c_int = c_int(9)
 
 
 # ── Loopback client helpers ────────────────────────────────────────────────
@@ -147,7 +129,7 @@ def test_static_multicore_sequential_keepalive_churn() raises:
     var port = UInt16(srv.local_addr().port)
     assert_true(Int(port) > 0, "server must bind to a positive port")
 
-    var pid = _fork()
+    var pid = fork()
     if pid == 0:
         try:
             var resp = precompute_response(
@@ -158,8 +140,8 @@ def test_static_multicore_sequential_keepalive_churn() raises:
             srv.serve_static_multicore(resp^, num_workers=4, pin_cores=False)
         except:
             pass
-        _exit_child()
-    _usleep(c_int(120000))
+        exit()
+    usleep(120000)
 
     var req = String(
         "GET /plaintext HTTP/1.1\r\nHost: 127.0.0.1\r\n"
@@ -182,8 +164,8 @@ def test_static_multicore_sequential_keepalive_churn() raises:
             failed_at = c
             break
 
-    _ = _kill(pid, _SIGKILL)
-    _waitpid(pid)
+    _ = kill(pid, SIGKILL)
+    waitpid(pid)
 
     assert_equal(failed_at, -1, "sequential conn churn failed mid-test")
     assert_equal(total_ok, 8 * 50, "expected 400 successful round-trips")
@@ -202,7 +184,7 @@ def test_static_multicore_concurrent_fanout() raises:
     var port = UInt16(srv.local_addr().port)
     assert_true(Int(port) > 0, "server must bind to a positive port")
 
-    var pid = _fork()
+    var pid = fork()
     if pid == 0:
         try:
             var resp = precompute_response(
@@ -213,8 +195,8 @@ def test_static_multicore_concurrent_fanout() raises:
             srv.serve_static_multicore(resp^, num_workers=4, pin_cores=False)
         except:
             pass
-        _exit_child()
-    _usleep(c_int(120000))
+        exit()
+    usleep(120000)
 
     var req = String(
         "GET /plaintext HTTP/1.1\r\nHost: 127.0.0.1\r\n"
@@ -242,8 +224,8 @@ def test_static_multicore_concurrent_fanout() raises:
             failed_at = c
             break
 
-    _ = _kill(pid, _SIGKILL)
-    _waitpid(pid)
+    _ = kill(pid, SIGKILL)
+    waitpid(pid)
 
     assert_equal(failed_at, -1, "concurrent fanout failed mid-test")
     assert_equal(total_ok, 8 * 30, "expected 240 successful round-trips")

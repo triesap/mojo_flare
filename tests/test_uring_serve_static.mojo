@@ -20,9 +20,19 @@ test-server battery still passes everywhere.
 """
 
 from std.testing import assert_equal, assert_true, TestSuite
-from std.ffi import c_int, c_uint, c_size_t, c_ssize_t, external_call
+from std.ffi import c_int, c_size_t, c_ssize_t, c_uint
 from std.memory import UnsafePointer, stack_allocation
 from std.sys.info import CompilationTarget
+
+
+from flare.utils import (
+    SIGKILL,
+    exit,
+    fork,
+    kill,
+    usleep,
+    waitpid,
+)
 
 from flare.http import HttpServer, precompute_response
 from flare.net import SocketAddr
@@ -43,34 +53,6 @@ from flare.runtime.uring_reactor import use_uring_backend
 
 
 # ── POSIX shims (same shape as test_tls.mojo) ────────────────────────────────
-
-
-@always_inline
-def _fork() -> c_int:
-    return external_call["fork", c_int]()
-
-
-@always_inline
-def _waitpid(pid: c_int):
-    _ = external_call["waitpid", c_int](pid, 0, c_int(0))
-
-
-@always_inline
-def _exit_child(code: c_int = c_int(0)):
-    _ = external_call["_exit", c_int](code)
-
-
-@always_inline
-def _usleep(us: c_int):
-    _ = external_call["usleep", c_int](us)
-
-
-@always_inline
-def _kill(pid: c_int, sig: c_int) -> c_int:
-    return external_call["kill", c_int](pid, sig)
-
-
-comptime _SIGKILL: c_int = c_int(9)
 
 
 # ── Loopback client helper (same shape as
@@ -110,7 +92,7 @@ def _connect_loopback(port: UInt16) raises -> c_int:
         if _connect(c, sa, c_uint(16)) >= c_int(0):
             return c
         _ = _close(c)
-        _ = external_call["usleep", c_int](c_int(20000))
+        usleep(20000)
     return c_int(-1)
 
 
@@ -151,7 +133,7 @@ def test_serve_static_io_uring_round_trip() raises:
         body=body,
     )
 
-    var pid = _fork()
+    var pid = fork()
     if pid == 0:
         # Child: drive the reactor loop forever. Parent kills us
         # with SIGKILL after asserting on the response. Use
@@ -162,12 +144,12 @@ def test_serve_static_io_uring_round_trip() raises:
             srv.serve_static(resp)
         except:
             pass
-        _exit_child()
+        exit()
     # Parent: give the child time to enter ``poll(min_complete=1)``.
     # 80ms matches test_tls.mojo's ``_spawn_echo_server`` budget;
     # the io_uring submit + the multishot accept arming together
     # take << 1ms, so this is very conservative.
-    _usleep(c_int(80000))
+    usleep(80000)
 
     # Open a TCP client and fire one keep-alive GET.
     var client_fd = _connect_loopback(port)
@@ -183,8 +165,8 @@ def test_serve_static_io_uring_round_trip() raises:
             "(skipped: io_uring serve loop did not accept on this runner;"
             " keep io_uring opt-in until the runtime path stabilises)"
         )
-        _ = _kill(pid, _SIGKILL)
-        _waitpid(pid)
+        _ = kill(pid, SIGKILL)
+        waitpid(pid)
         return
     try:
         var req = String(
@@ -242,8 +224,8 @@ def test_serve_static_io_uring_round_trip() raises:
     # Tear down the child process. SIGKILL because serve_static is
     # an infinite loop — the parent has no in-band way to flip
     # ``_stopping`` in the child's address space.
-    _ = _kill(pid, _SIGKILL)
-    _waitpid(pid)
+    _ = kill(pid, SIGKILL)
+    waitpid(pid)
 
 
 # ── Test runner ──────────────────────────────────────────────────────────────

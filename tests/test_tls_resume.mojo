@@ -34,12 +34,20 @@ Cases:
   doesn't crash.
 """
 
-from std.ffi import OwnedDLHandle, c_int, external_call
+from std.ffi import OwnedDLHandle, c_int
 from std.memory import UnsafePointer, stack_allocation
-from std.testing import assert_equal, assert_true, assert_false, TestSuite
+from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from flare.net.socket import _find_flare_lib
-from flare.tls import TlsConfig, TlsStream, TlsSession
+from flare.tls import TlsConfig, TlsSession, TlsStream
+from flare.utils import (
+    SIGKILL,
+    exit,
+    fork,
+    kill,
+    usleep,
+    waitpid,
+)
 
 
 comptime _CA_CRT: String = "tests/certs/ca.crt"
@@ -48,36 +56,8 @@ comptime _SERVER_KEY: String = "tests/certs/server.key"
 
 
 @always_inline
-def _fork() -> c_int:
-    return external_call["fork", c_int]()
-
-
-@always_inline
-def _waitpid(pid: c_int):
-    _ = external_call["waitpid", c_int](pid, 0, c_int(0))
-
-
-@always_inline
-def _exit_child():
-    _ = external_call["_exit", c_int](c_int(0))
-
-
-@always_inline
-def _kill(pid: c_int, sig: c_int) -> c_int:
-    return external_call["kill", c_int](pid, sig)
-
-
-@always_inline
-def _usleep(us: c_int):
-    _ = external_call["usleep", c_int](us)
-
-
-@always_inline
 def _c_str(s: String) -> Int:
     return Int(s.unsafe_ptr())
-
-
-comptime _SIGKILL: c_int = c_int(9)
 
 
 struct _TlsTestServer:
@@ -120,14 +100,14 @@ struct _TlsTestServer:
         _ = fn_n(self._ptr, c_int(n))
 
 
-def _spawn_echo_n(server: _TlsTestServer, n: Int) -> c_int:
-    var pid = _fork()
+def _spawn_echo_n(server: _TlsTestServer, n: Int) -> Int:
+    var pid = fork()
     if pid == 0:
         try:
             server.echo_n(n)
         except:
             pass
-        _exit_child()
+        exit()
     return pid
 
 
@@ -154,7 +134,7 @@ def test_session_round_trip_resumes() raises:
     var srv = _TlsTestServer(_SERVER_CRT, _SERVER_KEY)
     var port = UInt16(srv.port())
     var pid = _spawn_echo_n(srv, 2)
-    _usleep(c_int(120_000))
+    usleep(120_000)
 
     var raised = False
     var first_reused = True
@@ -186,8 +166,8 @@ def test_session_round_trip_resumes() raises:
         print("test_session_round_trip_resumes raised:", e)
         raised = True
 
-    _ = _kill(pid, _SIGKILL)
-    _waitpid(pid)
+    _ = kill(pid, SIGKILL)
+    waitpid(pid)
 
     assert_true(not raised, "resumption round trip raised")
     assert_false(first_reused, "first handshake must not be 'reused'")
@@ -212,7 +192,7 @@ def test_resume_with_empty_session_falls_back_to_full() raises:
     var srv = _TlsTestServer(_SERVER_CRT, _SERVER_KEY)
     var port = UInt16(srv.port())
     var pid = _spawn_echo_n(srv, 1)
-    _usleep(c_int(120_000))
+    usleep(120_000)
 
     var raised = False
     var reused = True
@@ -231,8 +211,8 @@ def test_resume_with_empty_session_falls_back_to_full() raises:
         print("test_resume_with_empty_session raised:", e)
         raised = True
 
-    _ = _kill(pid, _SIGKILL)
-    _waitpid(pid)
+    _ = kill(pid, SIGKILL)
+    waitpid(pid)
     assert_true(not raised, "empty-session resume raised")
     assert_false(reused, "empty session must trigger full handshake")
 
@@ -246,7 +226,7 @@ def test_session_addr_zero_when_not_yet_arrived() raises:
     var srv = _TlsTestServer(_SERVER_CRT, _SERVER_KEY)
     var port = UInt16(srv.port())
     var pid = _spawn_echo_n(srv, 1)
-    _usleep(c_int(120_000))
+    usleep(120_000)
 
     var raised = False
     try:
@@ -265,8 +245,8 @@ def test_session_addr_zero_when_not_yet_arrived() raises:
         print("test_session_addr_zero raised:", e)
         raised = True
 
-    _ = _kill(pid, _SIGKILL)
-    _waitpid(pid)
+    _ = kill(pid, SIGKILL)
+    waitpid(pid)
     assert_true(not raised, "session()-before-IO raised")
 
 

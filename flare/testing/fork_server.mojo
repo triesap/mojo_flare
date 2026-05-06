@@ -39,43 +39,21 @@ accepts is acceptable here. The startup sleep
 down for tighter integration tests.
 """
 
-from std.ffi import c_int, external_call
-
 from flare.http import Handler, HttpServer, Request, Response
-
-
-comptime _SIGKILL: c_int = c_int(9)
-
-
-@always_inline
-def _fork() -> c_int:
-    return external_call["fork", c_int]()
-
-
-@always_inline
-def _waitpid(pid: c_int):
-    _ = external_call["waitpid", c_int](pid, 0, c_int(0))
-
-
-@always_inline
-def _exit_child(code: c_int = c_int(0)):
-    _ = external_call["_exit", c_int](code)
-
-
-@always_inline
-def _kill(pid: c_int, sig: c_int) -> c_int:
-    return external_call["kill", c_int](pid, sig)
-
-
-@always_inline
-def _usleep(us: c_int):
-    _ = external_call["usleep", c_int](us)
+from flare.utils import (
+    SIGKILL,
+    exit,
+    fork,
+    kill,
+    usleep,
+    waitpid,
+)
 
 
 def fork_server(
     var srv: HttpServer,
     handler: def(Request) raises thin -> Response,
-    startup_us: c_int = c_int(150_000),
+    startup_us: Int = 150_000,
 ) raises -> Int:
     """Fork a child, run ``srv.serve(handler)`` in it, return the
     child PID to the parent after a brief startup wait.
@@ -104,15 +82,15 @@ def fork_server(
             ``serve()`` are swallowed (the child ``_exit``s); the
             parent only ever sees the PID.
     """
-    var pid = _fork()
-    if pid == c_int(0):
+    var pid = fork()
+    if pid == 0:
         try:
             srv.serve(handler)
         except:
             pass
-        _exit_child()
-    _usleep(startup_us)
-    return Int(pid)
+        exit()
+    usleep(startup_us)
+    return pid
 
 
 def fork_server[
@@ -120,7 +98,7 @@ def fork_server[
 ](
     var srv: HttpServer,
     var handler: H,
-    startup_us: c_int = c_int(150_000),
+    startup_us: Int = 150_000,
 ) raises -> Int:
     """Fork-and-serve overload for ``Handler``-struct shapes.
 
@@ -142,15 +120,15 @@ def fork_server[
     Raises:
         Error: If ``fork(2)`` fails.
     """
-    var pid = _fork()
-    if pid == c_int(0):
+    var pid = fork()
+    if pid == 0:
         try:
             srv.serve(handler^)
         except:
             pass
-        _exit_child()
-    _usleep(startup_us)
-    return Int(pid)
+        exit()
+    usleep(startup_us)
+    return pid
 
 
 def kill_forked_server(pid: Int):
@@ -159,5 +137,5 @@ def kill_forked_server(pid: Int):
     Args:
         pid: The PID returned by :func:`fork_server`.
     """
-    _ = _kill(c_int(pid), _SIGKILL)
-    _waitpid(c_int(pid))
+    _ = kill(pid, SIGKILL)
+    waitpid(pid)

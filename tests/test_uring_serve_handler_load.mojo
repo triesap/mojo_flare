@@ -14,10 +14,20 @@ throughput assertion -- it catches "totally broken bufring"
 regressions but does not police absolute throughput.
 """
 
-from std.ffi import c_int, c_uint, c_size_t, external_call
+from std.ffi import c_int, c_size_t, c_uint, external_call
 from std.memory import UnsafePointer, stack_allocation
 from std.sys.info import CompilationTarget
 from std.testing import assert_equal, assert_true, TestSuite
+
+
+from flare.utils import (
+    SIGKILL,
+    exit,
+    fork,
+    kill,
+    usleep,
+    waitpid,
+)
 
 from flare.http import (
     FnHandlerCT,
@@ -51,34 +61,6 @@ def _setenv(name: String, value: String, overwrite: c_int = c_int(1)) -> c_int:
     )
 
 
-@always_inline
-def _fork() -> c_int:
-    return external_call["fork", c_int]()
-
-
-@always_inline
-def _waitpid(pid: c_int):
-    _ = external_call["waitpid", c_int](pid, 0, c_int(0))
-
-
-@always_inline
-def _exit_child(code: c_int = c_int(0)):
-    _ = external_call["_exit", c_int](code)
-
-
-@always_inline
-def _usleep(us: c_int):
-    _ = external_call["usleep", c_int](us)
-
-
-@always_inline
-def _kill(pid: c_int, sig: c_int) -> c_int:
-    return external_call["kill", c_int](pid, sig)
-
-
-comptime _SIGKILL: c_int = c_int(9)
-
-
 def _connect_loopback(port: UInt16) raises -> c_int:
     """Connect to ``127.0.0.1:port``; retry up to ~2 s with 20 ms
     backoff. Returns ``-1`` if every attempt was refused (the
@@ -102,7 +84,7 @@ def _connect_loopback(port: UInt16) raises -> c_int:
         if _connect(c, sa, c_uint(16)) >= c_int(0):
             return c
         _ = _close(c)
-        _usleep(c_int(20000))
+        usleep(20000)
     return c_int(-1)
 
 
@@ -160,15 +142,15 @@ def test_bufring_load_clears_minimum_throughput() raises:
     var port = UInt16(srv.local_addr().port)
     assert_true(Int(port) > 0, "server must bind to a positive port")
 
-    var pid = _fork()
+    var pid = fork()
     if pid == 0:
         try:
             var h = _BenchHandler()
             srv.serve(h^)
         except:
             pass
-        _exit_child()
-    _usleep(c_int(120000))
+        exit()
+    usleep(120000)
 
     # Drive 8 conns sequentially, 10 keep-alive requests each =
     # 80 round-trips total. Sized to complete promptly while
@@ -199,8 +181,8 @@ def test_bufring_load_clears_minimum_throughput() raises:
             failed_at = c
             break
 
-    _ = _kill(pid, _SIGKILL)
-    _waitpid(pid)
+    _ = kill(pid, SIGKILL)
+    waitpid(pid)
 
     if skipped:
         print(

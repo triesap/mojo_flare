@@ -37,8 +37,18 @@ Coverage:
   HTTP/1.1.
 """
 
-from std.ffi import c_int, external_call
+from std.ffi import c_int
 from std.testing import assert_equal, assert_true
+
+
+from flare.utils import (
+    SIGKILL,
+    exit,
+    fork,
+    kill,
+    usleep,
+    waitpid,
+)
 
 from flare.http import (
     HttpClient,
@@ -48,34 +58,6 @@ from flare.http import (
     ok,
 )
 from flare.net import SocketAddr
-
-
-@always_inline
-def _fork() -> c_int:
-    return external_call["fork", c_int]()
-
-
-@always_inline
-def _waitpid(pid: c_int):
-    _ = external_call["waitpid", c_int](pid, 0, c_int(0))
-
-
-@always_inline
-def _exit_child(code: c_int = c_int(0)):
-    _ = external_call["_exit", c_int](code)
-
-
-@always_inline
-def _kill(pid: c_int, sig: c_int) -> c_int:
-    return external_call["kill", c_int](pid, sig)
-
-
-@always_inline
-def _usleep(us: c_int):
-    _ = external_call["usleep", c_int](us)
-
-
-comptime _SIGKILL: c_int = c_int(9)
 
 
 def _hello(req: Request) raises -> Response:
@@ -95,14 +77,14 @@ def test_h2_server_simple_handler() raises:
     var srv = HttpServer.bind(SocketAddr.localhost(0))
     var port = UInt16(srv.local_addr().port)
 
-    var pid = _fork()
+    var pid = fork()
     if pid == 0:
         try:
             srv.serve(_hello)
         except:
             pass
-        _exit_child()
-    _usleep(c_int(200000))
+        exit()
+    usleep(200000)
 
     var url = String("http://127.0.0.1:") + String(Int(port)) + String("/")
     var got_status = -1
@@ -115,8 +97,8 @@ def test_h2_server_simple_handler() raises:
     except:
         pass
 
-    _ = _kill(pid, _SIGKILL)
-    _waitpid(pid)
+    _ = kill(pid, SIGKILL)
+    waitpid(pid)
     assert_equal(got_status, 200)
     assert_equal(got_body, "hi")
 
@@ -139,14 +121,14 @@ def test_h2_server_router_dispatch() raises:
     var srv = HttpServer.bind(SocketAddr.localhost(0))
     var port = UInt16(srv.local_addr().port)
 
-    var pid = _fork()
+    var pid = fork()
     if pid == 0:
         try:
             srv.serve(_by_path_router)
         except:
             pass
-        _exit_child()
-    _usleep(c_int(200000))
+        exit()
+    usleep(200000)
 
     var base = String("http://127.0.0.1:") + String(Int(port))
     var got_a = String("")
@@ -158,8 +140,8 @@ def test_h2_server_router_dispatch() raises:
     except:
         pass
 
-    _ = _kill(pid, _SIGKILL)
-    _waitpid(pid)
+    _ = kill(pid, SIGKILL)
+    waitpid(pid)
     assert_equal(got_a, "a")
     assert_equal(got_b, "b")
 
@@ -170,14 +152,14 @@ def test_h2_server_request_body_round_trip() raises:
     var srv = HttpServer.bind(SocketAddr.localhost(0))
     var port = UInt16(srv.local_addr().port)
 
-    var pid = _fork()
+    var pid = fork()
     if pid == 0:
         try:
             srv.serve(_echo_body_len)
         except:
             pass
-        _exit_child()
-    _usleep(c_int(200000))
+        exit()
+    usleep(200000)
 
     var url = String("http://127.0.0.1:") + String(Int(port)) + String("/x")
     var got = String("")
@@ -188,8 +170,8 @@ def test_h2_server_request_body_round_trip() raises:
     except:
         pass
 
-    _ = _kill(pid, _SIGKILL)
-    _waitpid(pid)
+    _ = kill(pid, SIGKILL)
+    waitpid(pid)
     # ``{"hello":"h2"}`` is 14 bytes.
     assert_equal(got, "14")
 
@@ -200,14 +182,14 @@ def test_h2_server_request_headers_visible() raises:
     var srv = HttpServer.bind(SocketAddr.localhost(0))
     var port = UInt16(srv.local_addr().port)
 
-    var pid = _fork()
+    var pid = fork()
     if pid == 0:
         try:
             srv.serve(_echo_custom_header)
         except:
             pass
-        _exit_child()
-    _usleep(c_int(200000))
+        exit()
+    usleep(200000)
 
     var url = String("http://127.0.0.1:") + String(Int(port)) + String("/")
     var got = String("")
@@ -223,8 +205,8 @@ def test_h2_server_request_headers_visible() raises:
     except:
         pass
 
-    _ = _kill(pid, _SIGKILL)
-    _waitpid(pid)
+    _ = kill(pid, SIGKILL)
+    waitpid(pid)
     assert_equal(got, "hello-h2")
 
 

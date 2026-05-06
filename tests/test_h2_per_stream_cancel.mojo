@@ -25,6 +25,8 @@ Cases:
 
 from std.ffi import c_int
 
+from flare.utils import usleep
+
 from std.testing import assert_equal, assert_false, assert_true
 
 from flare.http import (
@@ -200,7 +202,7 @@ def test_on_readable_cancel_dispatches_through_cancel_handler() raises:
     dispatch should be byte-for-byte identical to the regular
     dispatch when nothing flips the cell.
     """
-    from std.ffi import c_size_t, external_call
+    from std.ffi import c_size_t
     from std.memory import stack_allocation
     from flare.http2 import HpackHeader, Http2ClientConnection
     from flare.net._libc import _recv, _send, MSG_NOSIGNAL
@@ -244,7 +246,7 @@ def test_on_readable_cancel_dispatches_through_cancel_handler() raises:
     var pump_attempts = 0
     while (not step_pump.want_write) and pump_attempts < 50:
         pump_attempts += 1
-        _ = external_call["usleep", c_int](c_int(2000))
+        usleep(2000)
         step_pump = handle.on_readable_cancel(h, cfg)
     assert_true(
         step_pump.want_write,
