@@ -36,6 +36,8 @@ an example file. For layering and the request lifecycle, see
 | Surface | Where |
 |---|---|
 | `HttpServer.bind(addr)` / `serve(handler)` / `serve(handler, num_workers=N)` — version-aware listener that dispatches HTTP/1.1, HTTP/2 over TLS (ALPN), and h2c (RFC 9113 §3.4 preface peek, no `Upgrade` dance) to the same handler | [`http_server.mojo`](../examples/basic/http_server.mojo), [`http2.mojo`](../examples/advanced/http2.mojo), [`http2_server_router.mojo`](../examples/advanced/http2_server_router.mojo) |
+| `HttpServer.bind_many(addrs: List[SocketAddr])` — single-worker listener over multiple distinct addresses; the accept loop walks every fd and demuxes onto the same handler. Multi-listener × multi-worker (`bind_many` + `num_workers >= 2`) is v0.7.x. | [`multi_listener.mojo`](../examples/intermediate/multi_listener.mojo) |
+| HTTP/1.1 trailer fields (RFC 7230 §4.1.2 / §4.4) — `Response.trailers: List[(String, String)]`, automatic `Trailer:` header, smuggling guard rejects trailers when `Content-Length` is present or when forbidden trailer names are listed; `HttpClient` parses trailers off the chunked decoder and lands them on `Response.trailers` | Shipped (v0.7) | [`trailers.mojo`](../examples/intermediate/trailers.mojo), [`tests/test_h1_trailers.mojo`](../tests/test_h1_trailers.mojo) |
 | `HttpServer.serve_static(StaticResponse)` — pre-encoded static-response fast path that skips parsing and handler dispatch (used by `flare_mc_static` bench row) | [`static_response.mojo`](../examples/intermediate/static_response.mojo) |
 | `HttpServer.serve_comptime[handler, config]()` — comptime-specialised reactor with build-time invariant checks on `ServerConfig` | `flare.http.server` |
 | Per-worker `SO_REUSEPORT` listeners by default (`num_workers >= 2`); `FLARE_REUSEPORT_WORKERS=0` switches to single-listener `EPOLLEXCLUSIVE` shape | [`multicore.mojo`](../examples/intermediate/multicore.mojo) |
@@ -52,6 +54,8 @@ an example file. For layering and the request lifecycle, see
 | Surface | Where |
 |---|---|
 | `HttpClient(base_url, auth=...)`, `HttpClient(prefer_h2c=True)` — version-aware over TLS+ALPN; `prefer_h2c=True` opts into HTTP/2 cleartext via prior knowledge | [`http_get.mojo`](../examples/basic/http_get.mojo), [`http2_client.mojo`](../examples/advanced/http2_client.mojo) |
+| `HttpClient.with_pool(...)` — HTTP/1.1 connection pool keyed on `(scheme, host, port)`, idle reuse, per-origin caps, stale-conn retry; opt-in via the builder | [`client_pool.mojo`](../examples/advanced/client_pool.mojo) |
+| `HttpClient(h2c_upgrade=True)` — h2c via Upgrade (RFC 7540 §3.2): client emits `Upgrade: h2c` + `HTTP2-Settings` on the first request, reads 101, carries the peer SETTINGS forward into a fresh h2 connection | [`h2c_client.mojo`](../examples/advanced/h2c_client.mojo), [`tests/test_h2c_client_upgrade.mojo`](../tests/test_h2c_client_upgrade.mojo) |
 | Module-level helpers: `get`, `post`, `put`, `patch`, `delete`, `head` — `post` with `String` body sets `Content-Type: application/json` automatically | `flare.http.client` |
 | `RedirectPolicy.FOLLOW_ALL` / `SAME_ORIGIN_ONLY` / `DENY` (default), `TooManyRedirects` error | `flare.http.{redirect_policy,error}` |
 | `Auth`, `BasicAuth(user, pass)`, `BearerAuth(token)` — both wires | `flare.http.auth` |
@@ -61,7 +65,7 @@ an example file. For layering and the request lifecycle, see
 
 | Surface | Where |
 |---|---|
-| `Router` — runtime trie with path parameters (`:name`), wildcards (`*`), method dispatch, 404 / 405-with-`Allow` | [`router.mojo`](../examples/basic/router.mojo) |
+| `Router` — runtime trie with path parameters (`:name`), wildcards (`*`), method dispatch, 404 / 405-with-`Allow`. v0.7: `Handler & Copyable & Movable` so `srv.serve(router^, num_workers=N)` resolves to the multi-worker overload; boxed struct handlers shared across worker copies via an Arc-style refcount | [`router.mojo`](../examples/basic/router.mojo), [`tests/test_router_copy.mojo`](../tests/test_router_copy.mojo) |
 | `ComptimeRouter[ROUTES]`, `ComptimeRoute(method, path, handler)` — segments parsed at compile time, dispatch loop unrolled per route | [`comptime_router.mojo`](../examples/advanced/comptime_router.mojo) |
 | `App[S, H]` — application-scoped state bundled with a handler; `state_view()` hands out a `State[S]` borrow that middleware can read or mutate | [`state.mojo`](../examples/intermediate/state.mojo) |
 | `State[S]` typed handle, `state.get()` borrow | [`state.mojo`](../examples/intermediate/state.mojo) |
@@ -186,11 +190,12 @@ deferred-to-a-later-minor.
 | Frame codec: `Frame`, `FrameFlags`, `FrameHeader`, `FrameType`, `encode_frame`, `parse_frame` (RFC 9113 §4, all 10 frame types) | Shipped, fuzz-clean (`fuzz-h2-frame`) | `flare.http2.frame` |
 | Stream state: `Stream`, `StreamState`, `Connection.handle_frame` (RFC 9113 §5) | Shipped, fuzz-clean (`fuzz-h2-continuation`, `fuzz-h2-rapid-reset`) | `flare.http2.state` |
 | HPACK (RFC 7541): `HpackEncoder`, `HpackDecoder`, `HpackHeader`, `encode_integer` / `decode_integer` (4/5/6/7-bit prefix codec); static + dynamic table, all four indexing modes, dynamic-table size update | Shipped, fuzz-clean (`fuzz-hpack-decoder`) | `flare.http2.hpack` |
-| HPACK Huffman codec | Scalar-correct (v0.7); SIMD decode deferred to v0.7.x | `flare.http.hpack_huffman` |
+| HPACK Huffman codec | Scalar-correct (v0.7), H=1 wire-up + RFC 7541 §C.4 fixtures shipped (v0.7), SIMD shim shipped as parity fallback (v0.7); accelerated SIMD kernel deferred to v0.8 | `flare.http.hpack_huffman`, `flare.http.hpack_huffman_simd` |
 | CONTINUATION-flood / RAPID-RESET (CVE-2023-44487) state-machine fuzz coverage | Fuzz-covered (v0.7); explicit per-second rate limits a v0.7.x defensive-hardening item if production exposure surfaces resource-exhaustion shapes the harnesses can't detect | `fuzz/fuzz_h2_continuation.mojo`, `fuzz/fuzz_h2_rapid_reset.mojo` |
-| RFC 8441 Extended CONNECT (client side — `WsClient` over h2) | Deferred to v0.7.x (today: `WsClient` forces ALPN `["http/1.1"]`) | n/a |
-| Per-stream `Cancel` propagation (peer RST_STREAM → handler `cancel.cancelled()`) | Deferred to v0.7.x (today: connection-level `Cancel` only) | n/a |
-| h1.1 client connection pool | Deferred to v0.8 | n/a |
+| RFC 8441 Extended CONNECT (client side — `WsClient` over h2) | Shipped (v0.7): `Http2ClientConnection.send_extended_connect` + `WsOverH2Stream` adapter + `bootstrap_ws_over_h2`. `WsClient.prefer_h2` ALPN dispatch is the v0.7.x next step. | [`ws_over_h2.mojo`](../examples/advanced/ws_over_h2.mojo), `flare.ws.client_h2` |
+| Per-stream `Cancel` propagation (peer RST_STREAM → handler `cancel.cancelled()`) | Shipped (v0.7): `H2ConnHandle` carries a `Dict[StreamId, Cancel]`, RST_STREAM / GOAWAY / drain all signal the matching cell | `flare.http._h2_conn_handle`, [`tests/test_h2_per_stream_cancel.mojo`](../tests/test_h2_per_stream_cancel.mojo) |
+| h1.1 client connection pool | Shipped (v0.7): `HttpClient.with_pool(...)` keyed on `(scheme, host, port)`, idle reuse + per-origin caps + stale-conn retry | [`client_pool.mojo`](../examples/advanced/client_pool.mojo), `flare.http.client_pool` |
+| h2c via Upgrade (client side — `Upgrade` + `HTTP2-Settings` + 101 carry-forward) | Shipped (v0.7) | [`h2c_client.mojo`](../examples/advanced/h2c_client.mojo), [`tests/test_h2c_client_upgrade.mojo`](../tests/test_h2c_client_upgrade.mojo) |
 
 ## WebSocket
 
@@ -201,6 +206,8 @@ deferred-to-a-later-minor.
 | `WsMessage` — high-level text / binary message wrapper | [`ergonomics.mojo`](../examples/basic/ergonomics.mojo) |
 | `WsFrame`, `WsOpcode`, `WsCloseCode`, `WsProtocolError` — low-level frame surface | `flare.ws.frame` |
 | Mandatory client-mask validation, UTF-8 validation on text frames (RFC 6455) | `flare.ws.frame` |
+| WS-over-HTTP/2 (RFC 8441) — `WsOverH2Stream` + `bootstrap_ws_over_h2`; CONNECT + `:protocol=websocket` over a single h2 stream, frame masking preserved | Shipped (v0.7) | [`ws_over_h2.mojo`](../examples/advanced/ws_over_h2.mojo), `flare.ws.client_h2` |
+| `permessage-deflate` (RFC 7692) — `PermessageDeflateConfig`, `compress_message` / `decompress_message`, `Sec-WebSocket-Extensions` parser + emitter, `negotiate_permessage_deflate`; v0.7 invariant: `no_context_takeover` on both sides + 16 MiB per-message decompressed cap | Shipped (v0.7) | [`ws_permessage_deflate.mojo`](../examples/advanced/ws_permessage_deflate.mojo), `flare.ws.permessage_deflate` |
 
 ## TLS
 
@@ -213,6 +220,7 @@ deferred-to-a-later-minor.
 | mTLS — construction-time validation of CA chain + client cert | [`mtls.mojo`](../examples/advanced/mtls.mojo) |
 | ALPN advertised + parsed on both sides; refusal-to-downgrade enforced | `flare.tls` |
 | `TLS_PROTOCOL_TLS12`, `TLS_PROTOCOL_TLS13` (1.0 / 1.1 refused) | `flare.tls.acceptor` |
+| Session resumption (RFC 5077 / RFC 8446 §4.6.1) — server-side ticket cache + client-side reconnect; opt-in via `TlsServerConfig.enable_session_resumption` and `TlsClientConfig.enable_session_resumption` | Shipped (v0.7) | [`tests/test_tls_resume.mojo`](../tests/test_tls_resume.mojo), `flare.tls.acceptor`, `flare.tls.config` |
 | Errors: `TlsHandshakeError`, `CertificateExpired`, `CertificateHostnameMismatch`, `CertificateUntrusted`, `TlsServerError`, `TlsServerNotImplemented` | `flare.tls.error` |
 
 ## TCP, UDP, Unix sockets, DNS, addressing

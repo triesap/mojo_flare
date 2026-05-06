@@ -58,6 +58,8 @@ basics.
 | [`brotli.mojo`](../examples/intermediate/brotli.mojo) | `compress_brotli` / `decompress_brotli` + `Compress` middleware emitting `br` |
 | [`ok_json_typed.mojo`](../examples/intermediate/ok_json_typed.mojo) | Typed JSON request → typed JSON response via `ok_json_value` |
 | [`infallible_handler.mojo`](../examples/intermediate/infallible_handler.mojo) | `HandlerInfallible` + `WithRaises` adapter for provably no-`raises` paths |
+| [`trailers.mojo`](../examples/intermediate/trailers.mojo) | HTTP/1.1 trailer fields (gRPC-style status trailer): `Response.trailers`, `Trailer:` header, smuggling guard |
+| [`multi_listener.mojo`](../examples/intermediate/multi_listener.mojo) | `HttpServer.bind_many` over multiple distinct addresses, single accept loop |
 
 ## Advanced — comptime, low-level reactor, HTTP/2, mTLS, work-stealing
 
@@ -79,6 +81,10 @@ natural.
 | [`http2_config.mojo`](../examples/advanced/http2_config.mojo) | `Http2Config` SETTINGS knobs + validation |
 | [`http2_client.mojo`](../examples/advanced/http2_client.mojo) | `HttpClient(prefer_h2c=True)` GET + POST over h2c (cleartext HTTP/2 via prior knowledge) |
 | [`http2_server_router.mojo`](../examples/advanced/http2_server_router.mojo) | Path-dispatching handler served over HTTP/2 via the unified `HttpServer.serve(handler)` (auto-dispatches HTTP/1.1 + HTTP/2 on the same port) |
+| [`h2c_client.mojo`](../examples/advanced/h2c_client.mojo) | HTTP/2 cleartext client via the `Upgrade: h2c` + `HTTP2-Settings` dance (RFC 7540 §3.2): first request flows over h1 then carries forward to h2 |
+| [`client_pool.mojo`](../examples/advanced/client_pool.mojo) | `HttpClient.with_pool` — keyed idle reuse, per-origin caps, stale-conn retry |
+| [`ws_over_h2.mojo`](../examples/advanced/ws_over_h2.mojo) | RFC 8441 WebSockets-over-HTTP/2 (Extended CONNECT + `:protocol=websocket`) |
+| [`ws_permessage_deflate.mojo`](../examples/advanced/ws_permessage_deflate.mojo) | RFC 7692 `permessage-deflate` extension: offer / negotiate / compress / decompress |
 
 ---
 
@@ -120,6 +126,12 @@ natural.
 | Serve HTTP/1.1 + HTTP/2 from one port | [`http2_server_router.mojo`](../examples/advanced/http2_server_router.mojo) |
 | AF_UNIX sidecar IPC | [`uds_sidecar.mojo`](../examples/advanced/uds_sidecar.mojo) |
 | Even out skewed-keepalive load | [`work_stealing.mojo`](../examples/advanced/work_stealing.mojo) |
+| Emit gRPC-style HTTP/1.1 trailers | [`trailers.mojo`](../examples/intermediate/trailers.mojo) |
+| Bind a single worker on multiple addresses | [`multi_listener.mojo`](../examples/intermediate/multi_listener.mojo) |
+| Speak h2c via the `Upgrade` dance from a client | [`h2c_client.mojo`](../examples/advanced/h2c_client.mojo) |
+| Reuse h1.1 connections via `HttpClient.with_pool` | [`client_pool.mojo`](../examples/advanced/client_pool.mojo) |
+| Tunnel WebSockets over HTTP/2 (RFC 8441) | [`ws_over_h2.mojo`](../examples/advanced/ws_over_h2.mojo) |
+| Compress WebSocket payloads with `permessage-deflate` | [`ws_permessage_deflate.mojo`](../examples/advanced/ws_permessage_deflate.mojo) |
 
 ## Reading data from a `Request`
 
