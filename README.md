@@ -65,21 +65,19 @@ The tour below grows the snippet at the top of this README out, one persona at a
 
 ### Beginner: your first router
 
-Two routes, one with a path parameter, a JSON-shaped response. This is where most apps start: `def` handlers, a `Router`, `HttpServer.bind`, `num_workers`. No traits, no generics, no extractors yet.
+Three routes — two infallible, one that may fail — a path parameter, a JSON response. This is where most apps start: `def` handlers, a `Router`, `HttpServer.bind`, `num_workers`. No traits, no generics, no extractors yet.
 
 ```mojo
-from flare import HttpServer, Router, Request, Response, ok, SocketAddr
+from flare.prelude import *  # Request, Response, Router, HttpServer, ok, ok_json, SocketAddr, ...
 
-def home(req: Request) raises -> Response:
+def home(req: Request) -> Response:                     # no raises - body cannot fail
     return ok("flare is up")
 
-def greet(req: Request) raises -> Response:
-    return ok("hello, " + req.param("name"))
+def health(req: Request) -> Response:                   # no raises - static JSON
+    return ok_json('{"status":"ok"}')
 
-def health(req: Request) raises -> Response:
-    var resp = ok('{"status":"ok"}')
-    resp.headers.set("Content-Type", "application/json")
-    return resp^
+def greet(req: Request) raises -> Response:             # raises - req.param("name")
+    return ok("hello, " + req.param("name"))            #   raises if :name is missing
 
 def main() raises:
     var r = Router()
@@ -91,9 +89,13 @@ def main() raises:
     srv.serve(r^, num_workers=4)
 ```
 
+`flare.prelude` re-exports the everyday handler surface — `Request`, `Response`, `Router`, `HttpServer`, `ok` / `ok_json` / `ok_json_value` / `not_found` / `bad_request` / `internal_error` / `redirect`, `Method` / `Status`, the `Handler` family, `SocketAddr`. Anything outside that set (typed extractors, middleware, sessions, cookies, forms, comptime routing, HTTP/2 internals, lower-level transports) stays as an explicit `from flare.http import ...` so the import block continues to document what each module reaches for. For the very first hello-world up at the top of this README we kept the explicit import to show which names are in play; everywhere else the prelude is enough.
+
+`raises` is optional and tracks the body. If the handler genuinely cannot fail (`home`, `health` above) drop the annotation; if it parses input or talks to a DB (`greet`'s `req.param` raises when `:name` is missing) keep it and let the server's catch-converts-to-500 contract take over. Mojo's function-type subtyping accepts both shapes at the same `Router.get(...)` call site. For *stateful* infallible handlers (the body still cannot fail but needs to carry struct fields) see [`HandlerInfallible`](examples/intermediate/infallible_handler.mojo).
+
 What you get for free: 404 on unknown paths, 405 with `Allow` on wrong method, sanitized 4xx / 5xx bodies, peer-FIN cancellation, RFC 7230 size limits, the per-worker reactor with `kqueue` / `epoll`.
 
-For request bodies, query strings, cookies, sessions, multipart forms, gzip / brotli, TLS, HTTP/2, and WebSocket: all under [`examples/`](examples/) (`05_http_get`, `13_cookies`, `28_forms`, `29_multipart_upload`, `30_sessions`, `34_brotli`, `12_tls`, `35_http2`, `06_websocket_echo`).
+For request bodies, query strings, cookies, sessions, multipart forms, gzip / brotli, TLS, HTTP/2, and WebSocket: all under [`examples/`](examples/) (`basic/http_get`, `basic/cookies`, `intermediate/forms`, `intermediate/multipart_upload`, `intermediate/sessions`, `intermediate/brotli`, `basic/tls`, `advanced/http2`, `basic/websocket_echo`).
 
 ### Intermediate: typed extractors
 
@@ -271,7 +273,7 @@ from flare.dns import resolve
 from flare.runtime import Reactor, INTEREST_READ
 ```
 
-Round-trip examples for each (`04_tcp_echo`, `06_websocket_echo`, `11_udp`, `12_tls`, `14_reactor`) live under [`examples/`](examples/), and the rendered package docstring at <https://ehsanmok.github.io/flare/> walks the layered API top-down. Use cases: a custom protocol over TLS, a UDP client / server, a WebSocket client driven from a CLI tool, or a hand-rolled non-HTTP server on top of the same reactor that powers `HttpServer`.
+Round-trip examples for each (`basic/tcp_echo`, `basic/websocket_echo`, `basic/udp`, `basic/tls`, `advanced/reactor`) live under [`examples/`](examples/), and the rendered package docstring at <https://ehsanmok.github.io/flare/> walks the layered API top-down. Use cases: a custom protocol over TLS, a UDP client / server, a WebSocket client driven from a CLI tool, or a hand-rolled non-HTTP server on top of the same reactor that powers `HttpServer`.
 
 ## Architecture
 

@@ -84,11 +84,23 @@ trait Handler(ImplicitlyDestructible, Movable):
     injects state, and any user struct can implement the trait for its
     own routing / middleware / adapter needs.
 
-    For handlers whose body is provably infallible (static-response
-    fast paths, sentinel routes, health checks), see the sibling
-    :trait:`HandlerInfallible` trait + :class:`WithRaises` adapter --
-    the ``raises`` annotation in the cookbook examples is a real cost
-    on those code paths.
+    The bare-function ``def(Request) -> Response`` (no ``raises``)
+    shape is also accepted at every ``Router.get`` / ``Router.post``
+    / ... call site: Mojo's function-type subtyping implicitly
+    upcasts a non-raising function pointer to the raising
+    ``def(Request) raises thin -> Response`` parameter type. For
+    stateless infallible endpoints (health checks, ``/version``,
+    fixed-string responses) prefer the bare-function shape — it
+    avoids the trait-and-adapter ceremony of the struct path::
+
+        def health(req: Request) -> Response:
+            return ok('{"status":"ok"}')
+
+        r.get("/health", health)
+
+    For *stateful* infallible handlers (the body still cannot fail
+    but needs to carry struct fields), see the sibling
+    :trait:`HandlerInfallible` trait + :class:`WithRaises` adapter.
     """
 
     def serve(self, req: Request) raises -> Response:

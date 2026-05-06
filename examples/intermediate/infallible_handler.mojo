@@ -1,29 +1,41 @@
-"""Example 43: HandlerInfallible vs Handler -- when to pick which (v0.7).
+"""Example 43: infallible handlers -- bare function vs HandlerInfallible (v0.7).
 
-Most flare handlers extend :trait:`flare.http.Handler`:
+flare accepts three shapes for a "this handler cannot fail" endpoint.
+In rough order of ergonomics (cheapest first):
 
-    def serve(self, req: Request) raises -> Response: ...
+1. **Bare function, no ``raises``.**
 
-The ``raises`` annotation is the right shape for 99 % of handler
-bodies: realistic code paths can fail (DB query, deserialise,
-external HTTP, etc.) and the server's catch-converts-to-500
-contract handles them uniformly.
+       def health(req: Request) -> Response:
+           return ok('{"status":"ok"}')
 
-But some handler bodies *literally cannot* fail:
+       r.get("/health", health)
 
-* A static-response fast path that returns a pre-built
-  :class:`flare.http.Response`.
-* A health-check route that always returns 200.
-* A sentinel "the handler ran" route in tests.
+   Mojo's function-type subtyping implicitly upcasts a non-raising
+   ``def(Request) -> Response`` to the raising ``def(Request) raises
+   thin -> Response`` parameter type that ``Router.get`` declares,
+   so the call site needs nothing extra. **Use this for stateless
+   infallible endpoints** -- health checks, ``/version``,
+   fixed-string responses. No struct, no trait constraint trio,
+   no adapter.
 
-For those, :trait:`flare.http.HandlerInfallible` (v0.7) lets you
-write ``def serve(self, req) -> Response`` (no ``raises``). The
-:class:`flare.http.WithRaises` adapter wraps an infallible handler
-so it slots into Router / App / middleware that expect the regular
-:trait:`Handler`.
+2. **A struct that conforms to** :trait:`flare.http.HandlerInfallible`.
+
+   For *stateful* infallible handlers (the body still cannot fail
+   but needs to carry struct fields), implement
+   :trait:`HandlerInfallible` -- the no-``raises`` sibling of the
+   regular :trait:`Handler` trait. Wrap with :class:`WithRaises` to
+   slot into ``Router`` / ``App`` / middleware that expect the
+   regular :trait:`Handler`. The ``WithRaises`` adapter is
+   zero-overhead at runtime (``@always_inline`` forwards directly
+   to the inner ``serve``).
+
+3. **A regular** :trait:`Handler` **struct or function with**
+   ``raises``. The default for everything else; the server's
+   catch-converts-to-500 contract handles arbitrary failures
+   uniformly.
 
 Run:
-    mojo -I . examples/43_infallible_handler.mojo
+    mojo -I . examples/intermediate/infallible_handler.mojo
 """
 
 from flare.http import (
@@ -37,68 +49,127 @@ from flare.http import (
 )
 
 
+# ── Shape 1: bare function, no ``raises`` -------------------------------------
+
+
+def health(req: Request) -> Response:
+    """Stateless health probe.
+
+    Provably infallible: no parsing, no allocation that can fail in
+    the reactor's hot path. Mounts on a Router with a single line
+    and no adapter::
+
+        r.get("/health", health)
+    """
+    return ok('{"status":"ok"}')
+
+
+def echo_method(req: Request) -> Response:
+    """Stateless: returns a fixed string for the request method.
+    Still provably infallible -- no header parsing, no body read.
+    Shows that infallible bare-function handlers can still inspect
+    the request, just not in ways that can raise."""
+    return ok("method=" + req.method)
+
+
+# ── Shape 2: HandlerInfallible struct (for *stateful* infallible bodies) ──────
+
+
 @fieldwise_init
-struct HealthCheck(Copyable, HandlerInfallible, Movable):
-    """Always-OK health probe. Provably infallible: no parsing,
-    no allocation that can fail in the reactor's hot path."""
+struct GreetingProbe(Copyable, HandlerInfallible, Movable):
+    """A health probe that carries a configurable greeting in
+    struct state. The body still literally cannot fail (no parsing,
+    no I/O, no allocation that can raise) but the handler needs to
+    carry a field, so the bare-function shape doesn't fit.
+
+    :class:`WithRaises[GreetingProbe]` adapts this to the regular
+    :trait:`Handler` constraint for ``Router.get(...)``.
+    """
+
+    var greeting: String
 
     @always_inline
     def serve(self, req: Request) -> Response:
-        return ok('{"status":"ok"}')
+        return ok(self.greeting)
 
 
-@fieldwise_init
-struct EchoMethod(Copyable, HandlerInfallible, Movable):
-    """Returns a fixed string for the request method. Still
-    provably infallible -- no header parsing, no body read.
-    Showcases that infallible handlers can still inspect the
-    request, just not in ways that can raise."""
-
-    @always_inline
-    def serve(self, req: Request) -> Response:
-        return ok("method=" + req.method)
+# ── Shape 3 (counterpoint): regular Handler with ``raises`` -------------------
 
 
 def fallible_user_lookup(req: Request) raises -> Response:
     """A regular :trait:`Handler`-shaped handler: parsing the
     request URL into an int *can* fail (non-numeric path param),
-    so this handler keeps the ``raises`` shape."""
+    so this handler keeps the ``raises`` shape and lets the
+    server's catch-converts-to-500 contract take over."""
     var id_str = req.param("id")
     if id_str.byte_length() == 0:
         return Response(status=400, reason="Missing :id")
-    var as_int = atol(id_str)  # may raise ValueError
+    var as_int = atol(id_str)
     return ok("user=" + String(as_int))
 
 
 def main() raises:
-    """Demo only -- no live server. Shows the wiring at a glance.
+    """Demo only -- no live server. Shows each shape side-by-side.
 
-    A real app would mount the handlers on a Router::
+    A real app would wire all three on the same Router::
 
         var r = Router()
-        r.get("/health", WithRaises[HealthCheck](HealthCheck()))
-        r.get("/method", WithRaises[EchoMethod](EchoMethod()))
-        r.get("/user/:id", fallible_user_lookup)
+        r.get("/health", health)                                           # shape 1
+        r.get("/method", echo_method)                                      # shape 1
+        r.get[WithRaises[GreetingProbe]]("/greet",
+            WithRaises[GreetingProbe](GreetingProbe(greeting="hi")))       # shape 2
+        r.get("/user/:id", fallible_user_lookup)                           # shape 3
         srv.serve(r^)
     """
     var req = Request(method="GET", url="/health", version="HTTP/1.1")
 
-    # Direct call: HandlerInfallible.serve has no ``raises`` keyword,
-    # so the call site is plain (no ``try`` / ``except`` needed).
-    var health = HealthCheck()
-    var hr = health.serve(req)
+    var hr = health(req)
     print(
-        "health: status=", hr.status, "body=", String(unsafe_from_utf8=hr.body)
+        "health (bare fn):  status=",
+        hr.status,
+        "body=",
+        String(unsafe_from_utf8=hr.body),
     )
 
-    var echo = EchoMethod()
-    var er = echo.serve(req)
+    var er = echo_method(req)
     print(
-        "echo:   status=", er.status, "body=", String(unsafe_from_utf8=er.body)
+        "method (bare fn):  status=",
+        er.status,
+        "body=",
+        String(unsafe_from_utf8=er.body),
     )
 
-    # Adapter: WithRaises[Inner] satisfies the regular Handler
-    # constraint, so it slots into Router / App.
-    var adapted = WithRaises[HealthCheck](HealthCheck())
+    var probe = GreetingProbe(
+        greeting="hello from a stateful infallible handler"
+    )
+    var pr = probe.serve(req)
+    print(
+        "greet (struct):    status=",
+        pr.status,
+        "body=",
+        String(unsafe_from_utf8=pr.body),
+    )
+
+    var adapted = WithRaises[GreetingProbe](
+        GreetingProbe(greeting="via WithRaises adapter")
+    )
     var ar = adapted.serve(req)
-    print("via adapter:", ar.status, String(unsafe_from_utf8=ar.body))
+    print(
+        "greet (adapted):   status=",
+        ar.status,
+        "body=",
+        String(unsafe_from_utf8=ar.body),
+    )
+
+    # Register the bare-function shapes on a Router to prove the
+    # implicit no-raises -> raises upcast at the registration site.
+    var r = Router()
+    r.get("/health", health)
+    r.get("/method", echo_method)
+    var hresp = r.serve(req)
+    print(
+        "router /health:    status=",
+        hresp.status,
+        "body=",
+        String(unsafe_from_utf8=hresp.body),
+    )
