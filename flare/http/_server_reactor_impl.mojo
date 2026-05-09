@@ -3412,26 +3412,21 @@ def run_uring_bufring_reactor_loop[
             )
             var buf = pool_ptr + (bid * _URING_BR_BUF_SIZE)
             var ch_ptr = _conn_ptr_from_int(conns[conn_id])
-            var bytes = Span[UInt8, _](ptr=buf, length=n)
-            var step_done = False
-            if submit_send:
-                if ch_ptr[].send_in_flight:
-                    for i in range(n):
-                        ch_ptr[].read_buf.append((buf + i).load())
-                else:
-                    step_done = _drive_handler_with_submit_send[H](
-                        fd,
-                        conn_id,
-                        bytes,
-                        config,
-                        handler,
-                        ch_ptr,
-                        ureactor,
-                    )
-            else:
-                step_done = _drive_handler_after_buf_recv[H](
-                    bytes, config, handler, ch_ptr
-                )
+
+            # Mojo 1.0.0b1 destructor-reorder fix: stage the kernel
+            # bytes into the conn's owned ``read_buf`` BEFORE the
+            # handler runs, so the ``Span`` we hand the parser has
+            # an origin tied to a frame-local stack alloc instead
+            # of the kernel-shared pool. The dispatch handler used
+            # to read directly from the kernel buffer over the
+            # pool-derived ``Span``; under stricter destructor
+            # scheduling the kernel could re-issue the buffer slot
+            # to a new recv before the handler finished reading it.
+            # Staging here narrows the read-Span's origin and lets
+            # us recycle the kernel slot immediately.
+            ch_ptr[].read_buf.reserve(len(ch_ptr[].read_buf) + n)
+            for i in range(n):
+                ch_ptr[].read_buf.append((buf + i).load())
 
             # Recycle the buffer back into the ring (SQE-free).
             var cur_tail = _pbuf_ring_get_tail(ring_addr)
@@ -3445,6 +3440,30 @@ def run_uring_bufring_reactor_loop[
                 cur_tail,
             )
             _pbuf_ring_set_tail(ring_addr, cur_tail + UInt16(1))
+
+            # Run the handler against an empty slice -- the bytes
+            # are already in ``read_buf`` from the staging copy
+            # above. ``on_readable_from_buf`` will see the new
+            # bytes via ``read_buf`` rather than the (already-
+            # recycled) kernel pool slot.
+            var step_done = False
+            var empty_buf = stack_allocation[1, UInt8]()
+            var empty_span = Span[UInt8, _](ptr=empty_buf, length=0)
+            if submit_send:
+                if not ch_ptr[].send_in_flight:
+                    step_done = _drive_handler_with_submit_send[H](
+                        fd,
+                        conn_id,
+                        empty_span,
+                        config,
+                        handler,
+                        ch_ptr,
+                        ureactor,
+                    )
+            else:
+                step_done = _drive_handler_after_buf_recv[H](
+                    empty_span, config, handler, ch_ptr
+                )
 
             # Re-arm if the kernel disarmed the multishot.
             if (not step_done) and (not comp.has_more):
@@ -3616,26 +3635,14 @@ def run_uring_bufring_reactor_loop_shared[
             )
             var buf = pool_ptr + (bid * _URING_BR_BUF_SIZE)
             var ch_ptr = _conn_ptr_from_int(conns[conn_id])
-            var bytes = Span[UInt8, _](ptr=buf, length=n)
-            var step_done = False
-            if submit_send:
-                if ch_ptr[].send_in_flight:
-                    for i in range(n):
-                        ch_ptr[].read_buf.append((buf + i).load())
-                else:
-                    step_done = _drive_handler_with_submit_send[H](
-                        fd,
-                        conn_id,
-                        bytes,
-                        config,
-                        handler,
-                        ch_ptr,
-                        ureactor,
-                    )
-            else:
-                step_done = _drive_handler_after_buf_recv[H](
-                    bytes, config, handler, ch_ptr
-                )
+
+            # Stage the kernel bytes into the conn's ``read_buf``
+            # before the handler runs (Mojo 1.0.0b1 Span-origin
+            # narrowing -- see the matching block in the
+            # single-worker variant for the full rationale).
+            ch_ptr[].read_buf.reserve(len(ch_ptr[].read_buf) + n)
+            for i in range(n):
+                ch_ptr[].read_buf.append((buf + i).load())
 
             # Re-fill via shared-memory tail bump (PBUF_RING).
             var cur_tail = _pbuf_ring_get_tail(ring_addr)
@@ -3649,6 +3656,25 @@ def run_uring_bufring_reactor_loop_shared[
                 cur_tail,
             )
             _pbuf_ring_set_tail(ring_addr, cur_tail + UInt16(1))
+
+            var step_done = False
+            var empty_buf = stack_allocation[1, UInt8]()
+            var empty_span = Span[UInt8, _](ptr=empty_buf, length=0)
+            if submit_send:
+                if not ch_ptr[].send_in_flight:
+                    step_done = _drive_handler_with_submit_send[H](
+                        fd,
+                        conn_id,
+                        empty_span,
+                        config,
+                        handler,
+                        ch_ptr,
+                        ureactor,
+                    )
+            else:
+                step_done = _drive_handler_after_buf_recv[H](
+                    empty_span, config, handler, ch_ptr
+                )
 
             if (not step_done) and (not comp.has_more):
                 try:

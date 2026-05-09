@@ -1095,7 +1095,7 @@ struct Extracted[H: Copyable & Defaultable & Handler & Movable](
     def __init__(out self):
         pass
 
-    def __copyinit__(out self, existing: Self):
+    def __init__(out self, *, copy: Self):
         pass
 
     def serve(self, req: Request) raises -> Response:
