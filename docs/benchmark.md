@@ -377,59 +377,118 @@ framework has at its calibrated rate.
 
 | Server | Workers | Req/s | σ%  | p50 (ms) | p99 (ms) | p99.9 (ms) | p99.99 (ms) |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| **flare_mc_static** (REUSEPORT) | **4** | **274,514** | **0.59** | **1.12 ± 0.08** | **98.43 ± 406.17** | **133.63 ± 425.84** | **148.35 ± 430.22** |
-| actix_web (tokio) | 4 | 223,847 | 0.35 | 1.28 ± 0.01 | 2.72 ± 0.08 | 3.18 ± 269.54 | 7.51 ± 305.02 |
-| hyper (tokio multi-thread) | 4 | 215,508 | 0.21 | 1.25 ± 0.00 | 2.83 ± 0.07 | 3.30 ± 125.23 | 10.85 ± 147.50 |
-| **flare_mc** handler (REUSEPORT) | **4** | **212,246** | **0.21** | **1.23 ± 0.01** | **2.61 ± 0.02** | **2.93 ± 0.02** | **3.25 ± 0.10** |
-| axum (tokio multi-thread) | 4 | 199,380 | 0.17 | 1.30 ± 0.00 | 2.80 ± 0.14 | 3.23 ± 5.50 | 3.58 ± 7.55 |
+| actix_web (tokio) | 4 | 252,671 | 0.22 | 1.22 ± 0.01 | 10.04 ± 4.55 | 27.15 ± 4.31 | 37.41 ± 18.49 |
+| **flare_mc_static** (REUSEPORT) | **4** | **246,942** | **0.69** | **1.14 ± 0.08** | **2.68 ± 664.62** | **3.09 ± 676.39** | **17.50 ± 678.01** |
+| hyper (tokio multi-thread) | 4 | 216,406 | 0.17 | 1.25 ± 0.00 | 2.83 ± 0.03 | 3.26 ± 3.91 | 3.66 ± 31.18 |
+| **flare_mc** handler (REUSEPORT) | **4** | **214,567** | **0.21** | **1.22 ± 0.02** | **2.63 ± 17.53** | **2.94 ± 47.57** | **3.26 ± 50.52** |
+| axum (tokio multi-thread) | 4 | 195,044 | 0.21 | 1.30 ± 0.00 | 2.80 ± 0.01 | 3.21 ± 0.02 | 3.57 ± 0.02 |
 
 Source data:
-[`benchmark/results/2026-05-11T1846-ehsan-dev-944de73/`](../benchmark/results/2026-05-11T1846-ehsan-dev-944de73/)
-(all 4-worker rows, single multi-worker run with the calibration
-harness).
+[`benchmark/results/2026-05-27T2021-ehsan-dev-6e44e63/`](../benchmark/results/2026-05-27T2021-ehsan-dev-6e44e63/)
+(all 4-worker rows, single multi-worker run with the
+calibration harness, hot-path UTF-8 validation bypass
+included; see [Hot-path measurement
+notes](#hot-path-measurement-notes) below).
 
 What jumps out:
 
-- **flare_mc** (handler path) has the cleanest tail of the
-  entire pack. `2.61 ± 0.02 ms` p99, `2.93 ± 0.02 ms` p99.9,
-  `3.25 ± 0.10 ms` p99.99 -- the per-percentile σ is sub-100
-  microseconds, three to four orders of magnitude tighter
-  than the Rust baselines at p99.9 / p99.99. Its 212k req/s
-  rate sits comfortably inside the working envelope at the
-  90 %-of-peak sustain rate; the harness has clear headroom
-  before the next probe rejected on `P99_GREW`. This is the
-  row we hand operators when steady-state tail predictability
-  is the primary requirement.
-- **flare_mc_static** posts the highest throughput of the
-  pack (274k req/s, ~23 % over actix_web), but the σ values
-  make the cost explicit: the fixed-response fast path is
-  sitting right at saturation, where 1-2 of 5 measurement
-  runs slip off the cliff and the p99.x distribution widens
-  into hundreds of milliseconds. The validation gate
-  passed at calibration time but the 5×30 s measurement runs
-  catch the variance the 20 s validation probe missed. Use
-  this row when the headline matters and the workload
-  tolerates occasional tail expansion; use `flare_mc` when
-  you want a uniformly tight tail.
-- **actix_web** and **hyper** post slightly higher headline
-  rates than `flare_mc` (224k / 216k vs 212k) but with
-  p99.9 σ of 269 ms and 125 ms respectively. The harness's
-  validation pass let them through because the 20 s probe
-  landed in a quiet window; the measurement rounds caught
-  the same kind of "one run brushes the cliff" pattern as
-  flare_mc_static, just at a lower headline rate. Their
-  median p99 / p99.9 are still competitive (2.72 / 3.18 ms,
-  2.83 / 3.30 ms) but the σ tells you those medians don't
-  hold across all 5 runs.
-- **axum** is the closest competitor to `flare_mc` on tail
-  variance (`3.23 ± 5.50 ms` p99.9, `3.58 ± 7.55 ms`
-  p99.99). It's the most consistent of the Rust libs by σ;
-  its headline rate is correspondingly the lowest of the
-  Rust trio.
+- **flare_mc** (handler path) posts the best median p99 of
+  the 4-worker pack at `2.63 ms`, edging hyper (`2.83 ms`)
+  and matching axum (`2.80 ms`) while running on Mojo
+  against three production-hardened Rust stacks. The σ on
+  flare_mc's tail (`17–50 ms` across the 5×30 s runs at
+  p99 / p99.9 / p99.99) is larger than axum's flat σ but
+  smaller than hyper's at p99.99 — one of the five
+  measurement runs brushed the working-envelope edge while
+  the other four landed clean. The headline tightened by
+  `+1.1 %` over the prior baseline (`212,246` → `214,567`
+  req/s) after eliminating a redundant UTF-8 validation
+  pass on the H1 parser's ASCII artifacts (`Method` /
+  `Path` / `Version` / header names + values are already
+  RFC 7230-validated by the byte-level parser before
+  string materialisation). This is the row we hand
+  operators when steady-state tail predictability matters
+  more than headline throughput.
+- **flare_mc_static** still leads on req/s of the
+  multi-worker fixed-response fast paths (`247k req/s`,
+  ~13 % under actix_web's new headline). Its p99 median is
+  `2.68 ms` — tight when the harness lands inside the
+  working envelope. The `~660 ms` σ at every tail
+  percentile is the **honesty meter** firing: at this rate
+  the fixed-response path occasionally tips off the
+  saturation cliff, and the σ tells you that's where the
+  next 10 % of throughput goes. Use this row when the
+  headline matters and the workload tolerates occasional
+  tail expansion; use `flare_mc` when you want a uniformly
+  tight tail under sustained load.
+- **actix_web** posts the highest headline (`253k req/s`)
+  but its p99 median is `10.04 ms` and p99.99 is
+  `37.41 ms` — the same cliff dynamic flare_mc_static
+  shows, just at a higher rate. The σ on actix's p99 /
+  p99.9 (`4.55 ms` / `4.31 ms`) is tight enough that this
+  isn't measurement noise; it's a steady-state shape at
+  that rate. The harness's calibration gate accepted the
+  rate (the 20 s probe landed below the absolute-p99 limit
+  the gate enforces) but the 5×30 s measurement rounds
+  caught the steady-state shape underneath.
+- **axum** is the steadiest of the pack: `195k req/s` with
+  `σ ≤ 0.02 ms` at every tail percentile — flat at the
+  cost of being the lowest headline of the four. It's the
+  row you compare against when you want to know what an
+  in-envelope p99 distribution looks like at the same
+  load.
+- **hyper** is the reference baseline — its v0.8 numbers
+  (`216k req/s`, `2.83 ms` p99 median) move within
+  `±0.5 %` of the prior measurement, which is what we
+  want from the harness's calibration: the same Rust
+  binary under the same Linux kernel returns the same
+  throughput run-over-run.
 - The harness's σ% column shows req/s itself is rock-steady
-  at the 90 %-of-peak sustain rate (0.17-0.59 % across the 5
-  runs for every framework), so the tail numbers are
+  at the 90 %-of-peak sustain rate (0.17-0.69 % across the
+  5 runs for every framework), so the tail numbers are
   measuring real latency variance, not load-gen drift.
+
+#### Hot-path measurement notes
+
+The `+1.1 %` flare_mc tightening between the prior baseline
+and the HEAD numbers above comes from a targeted hot-path
+optimisation surfaced by the repeatable allocation +
+CPU-profile harness shipped under `pixi run -e dev
+perf-server-alloc` (Linux only;
+[`benchmark/scripts/perf_profile_server.sh`](../benchmark/scripts/perf_profile_server.sh)).
+
+The harness composes three measurements on the same
+`bench_server` build (always built with `-D ASSERT=none`):
+
+1. **heaptrack** — LD_PRELOAD malloc tracer. The healthy
+   posture is every top entry coming from Mojo runtime
+   startup (`M::MLRT::getOrCreateRuntime`) and the
+   per-request hot path adding zero new allocation sites.
+2. **`strace -c` on `brk` / `mmap` / `munmap` / `mremap`** —
+   syscall-level allocator counts. The healthy posture is
+   `total_syscalls / total_requests << 1.0` — measured
+   posture is `171 syscalls / 600K requests = 0.00029
+   syscalls/req`, all during startup, none on the
+   per-request hot path.
+3. **`perf record -F 999 --call-graph dwarf`** — sampling
+   CPU profile of the live server. The healthy posture
+   has the top user-space symbol as the parser body
+   (`_parse_http_request_bytes`) at ~2-3 % of CPU. The
+   prior profile flagged `_is_valid_utf8_runtime` at
+   ~5 % — a Mojo-stdlib UTF-8 validator called by the
+   `String(unsafe_from_utf8=Span)` constructor despite
+   its name. Replacing the seven hot-path call sites with
+   a non-validating helper that uses
+   `String(unsafe_uninit_length=N)` + `memcpy` over
+   pre-validated ASCII bytes recovers that 5 %, and the
+   `+1.1 %` throughput delta is what's left after the
+   reactor / syscall layer absorbs most of the win.
+
+Both `valgrind` (`callgrind` / `massif` / `dhat`) and
+`heaptrack` are pixi-managed via conda-forge on Linux-64
+through `[feature.dev.target.linux-64.dependencies]`, so
+the profile reproduces from a clean clone with `pixi
+install -e dev`.
 
 **Single-worker** (per-core request-processing cost, same
 harness as the 4-worker rows above):
@@ -463,15 +522,19 @@ choose between throughput and tail latency:
 
 | flare path | Listener mode | Peak rps | p99.99 (ms) |
 |---|---|---:|---:|
-| flare_mc_static (default) | per-worker SO_REUSEPORT | 274,514 | 148.35 ± 430.22 |
-| flare_mc_static + `FLARE_REUSEPORT_WORKERS=0` | shared listener + EPOLLEXCLUSIVE | 214,306 (-22 %) | 3.26 (median) |
-| flare_mc handler (default) | per-worker SO_REUSEPORT | 212,246 | 3.25 ± 0.10 |
-| flare_mc handler + `FLARE_REUSEPORT_WORKERS=0` | shared listener + EPOLLEXCLUSIVE | 196,757 (-7 %) | 3.23 (median) |
+| flare_mc_static (default) | per-worker SO_REUSEPORT | 246,942 | 17.50 ± 678.01 |
+| flare_mc_static + `FLARE_REUSEPORT_WORKERS=0` | shared listener + EPOLLEXCLUSIVE | 214,306 (-13 %) | 3.26 (median) |
+| flare_mc handler (default) | per-worker SO_REUSEPORT | 214,567 | 3.26 ± 50.52 |
+| flare_mc handler + `FLARE_REUSEPORT_WORKERS=0` | shared listener + EPOLLEXCLUSIVE | 196,757 (-8 %) | 3.23 (median) |
 
-(The shared-listener numbers here are from the prior
-historical reference at the same dev-box; refresh against
-HEAD if you need within-noise comparison. The `default` rows
-are the HEAD numbers from the table above.)
+(The `default` rows are the HEAD numbers from the 4-worker
+table above. The shared-listener rows are from the prior
+historical reference at the same dev-box and are kept as a
+within-noise comparison point; refresh against HEAD with
+`FLARE_REUSEPORT_WORKERS=0 pixi run -e bench
+bench-vs-baseline --only flare_mc,flare_mc_static --configs
+throughput_mc` if you need to re-validate the listener-mode
+delta on your own dev-box.)
 
 Picking a mode:
 

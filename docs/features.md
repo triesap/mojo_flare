@@ -128,6 +128,21 @@ by nesting structs:
 | `TimeoutMiddleware[Inner]` (`flare.http.Timeout`) | Bound the inner handler's wall-clock time; on overrun, the response is replaced with a sanitised 504; `budget_ms <= 0` is the explicit "disabled" sentinel that always trips 504 | [`reliability.mojo`](../examples/intermediate/reliability.mojo) |
 | `negotiate_encoding(Accept-Encoding) -> Encoding` | RFC 9110 §12.5.3 q-value parser exposed for direct use | `flare.http.middleware` |
 
+## HTTP caching (RFC 9111)
+
+Cache primitives and a bounded in-memory store. The
+directive parser and key derivation are ready to wire into
+custom middleware today; the unified `Cache[Inner, S]`
+wrapper is a follow-up that builds on these primitives.
+
+| Surface | Where |
+|---|---|
+| `parse_cache_control(headers) -> CacheControl` — RFC 9111 §5.2 directive parser (max-age, s-maxage, no-cache, no-store, private, public, must-revalidate, proxy-revalidate, immutable, stale-while-revalidate, stale-if-error) | `flare.http.cache.control` |
+| `CacheControl` — typed directive struct with the full RFC 9111 §5.2 surface | `flare.http.cache.control` |
+| `derive_cache_key(request) -> CacheKey`, `CacheKey` — method + canonical URL + `Vary`-aware key | `flare.http.cache.key` |
+| `CacheStore` trait + `InMemoryCacheStore(capacity)` — bounded LRU store with `get` / `put` / `invalidate`; freshness logic carried on `CacheEntry` | `flare.http.cache.store` |
+| `CacheEntry` — stored response payload + cache-control metadata + per-entry freshness timestamps | `flare.http.cache.store` |
+
 ## Cookies, sessions, auth
 
 | Surface | Where |
@@ -198,6 +213,49 @@ own dispatch loop.
 | Per-stream `Cancel` propagation (peer RST_STREAM → handler `cancel.cancelled()`): `H2ConnHandle` carries a `Dict[StreamId, Cancel]`, RST_STREAM / GOAWAY / drain all signal the matching cell | `flare.http._h2_conn_handle`, [`tests/http2/test_h2_per_stream_cancel.mojo`](../tests/http2/test_h2_per_stream_cancel.mojo) |
 | h1.1 client connection pool: `HttpClient.with_pool(...)` keyed on `(scheme, host, port)`, idle reuse + per-origin caps + stale-conn retry | [`client_pool.mojo`](../examples/advanced/client_pool.mojo), `flare.http.client_pool` |
 | h2c via Upgrade (client side — `Upgrade` + `HTTP2-Settings` + 101 carry-forward) | [`h2c_client.mojo`](../examples/advanced/h2c_client.mojo), [`tests/http/test_h2c_client_upgrade.mojo`](../tests/http/test_h2c_client_upgrade.mojo) |
+
+## HTTP/3 + QUIC codec primitives
+
+Sans-I/O codec primitives for QUIC v1 (RFC 9000) and HTTP/3
+(RFC 9114). Codecs only — the QUIC reactor, the TLS-on-UDP
+FFI, and the congestion-controller drive land alongside the
+QUIC server in a later release. The codecs are byte-clean
+against fixtures from `aioquic` + `quiche` and carry their
+own fuzz harnesses.
+
+| Surface | Where |
+|---|---|
+| QUIC variable-length integer codec (RFC 9000 §16): `QuicVarint`, `quic_encode_varint`, `quic_decode_varint`, `quic_varint_encoded_length`, `QUIC_VARINT_MAX` | `flare.quic.varint` |
+| QUIC long / short packet header codec (RFC 9000 §17): `QuicLongHeader`, `QuicShortHeader`, `QuicConnectionId`, `QuicInitialExtras`, `quic_encode_long_header`, `quic_encode_short_header`, `quic_parse_long_header`, `quic_parse_short_header`, `quic_parse_initial_extras` | `flare.quic.packet` |
+| QUIC packet-type constants: `QUIC_PACKET_TYPE_INITIAL` / `_ZERO_RTT` / `_HANDSHAKE` / `_RETRY`, `QUIC_VERSION_1`, `QUIC_VERSION_NEGOTIATION`, `QUIC_MAX_CID_LENGTH` | `flare.quic` |
+| HTTP/3 frame codec (RFC 9114 §7): `H3Frame`, `H3FrameType`, `encode_h3_frame`, `decode_h3_frame`; frame-type constants `H3_FRAME_TYPE_{DATA,HEADERS,CANCEL_PUSH,SETTINGS,PUSH_PROMISE,GOAWAY,MAX_PUSH_ID}` | `flare.h3.frame` |
+| HTTP/3 SETTINGS payload (RFC 9114 §7.2.4): `H3Setting`, `encode_h3_settings`, `decode_h3_settings`; standard identifiers `H3_SETTINGS_{QPACK_MAX_TABLE_CAPACITY,MAX_FIELD_SECTION_SIZE,QPACK_BLOCKED_STREAMS,ENABLE_CONNECT_PROTOCOL}` | `flare.h3.frame` |
+
+## gRPC
+
+Sans-I/O gRPC primitives on top of the `flare.http2` reactor.
+Ships the wire-level surface (LPM framing, canonical Status
+codes, Metadata carrier) that higher-level call shapes
+build on; service / stub generation lives in a follow-up
+module.
+
+| Surface | Where |
+|---|---|
+| Length-prefixed message framing (gRPC wire format): `GrpcMessage`, `GrpcDecodeResult`, `GrpcCompressionFlag`, `encode_grpc_message`, `decode_grpc_message`, `GRPC_COMPRESSION_NONE`, `GRPC_COMPRESSION_COMPRESSED` | `flare.grpc.framing` |
+| Canonical status codes (`GrpcStatus`): `GRPC_STATUS_OK`, `_CANCELLED`, `_UNKNOWN`, `_INVALID_ARGUMENT`, `_DEADLINE_EXCEEDED`, `_NOT_FOUND`, `_ALREADY_EXISTS`, `_PERMISSION_DENIED`, `_RESOURCE_EXHAUSTED`, `_FAILED_PRECONDITION`, `_ABORTED`, `_OUT_OF_RANGE`, `_UNIMPLEMENTED`, `_INTERNAL`, `_UNAVAILABLE`, `_DATA_LOSS`, `_UNAUTHENTICATED` | `flare.grpc.status` |
+| Metadata carrier with binary / text key discipline (`-bin` suffix for binary keys, base64 transport): `GrpcMetadata`, `GrpcMetadataEntry` | `flare.grpc.metadata` |
+
+## OpenAPI
+
+OpenAPI 3.1 spec model + deterministic JSON emitter. The
+model is hand-built today (manual `OpenApiSpec` construction
++ `emit_openapi_json`); auto-derivation from `ComptimeRouter`
+is the next iteration.
+
+| Surface | Where |
+|---|---|
+| Spec model: `OpenApiSpec`, `OpenApiInfo`, `OpenApiPath`, `OpenApiOperation`, `OpenApiParameter`, `OpenApiResponse` | `flare.openapi.spec` |
+| Deterministic JSON emitter (stable key order — diffable specs in CI): `emit_openapi_json(spec) -> String` | `flare.openapi.spec` |
 
 ## WebSocket
 
@@ -328,11 +386,25 @@ stability guarantee.
 ## Testing and fuzz coverage
 
 Test code reaches for two cross-cutting helper modules that the
-Mojo stdlib doesn't ship: `flare.testing` (`fork_server` /
-`kill_forked_server` — fork-and-serve so a single-process
-example can both serve and connect to itself) and `flare.utils`
-(POSIX FFI thunks: `fork` / `waitpid` / `kill` / `usleep` /
-`exit` / `getpid` plus `SIGKILL` / `SIGTERM` / `SIGINT`).
+Mojo stdlib doesn't ship: `flare.testing` and `flare.utils`.
+
+`flare.testing` ships two shapes:
+
+- `TestClient[H]` — FastAPI-style in-process handler exerciser.
+  Drives `Handler.serve` directly without binding a port, so
+  the same `Request` builder + assertions used in production
+  code paths work in unit tests. The compiler monomorphises
+  the parametric `H` so a `TestClient[MyHandler]` invocation
+  is a direct call, not a virtual dispatch.
+- `fork_server(handler, addr)` / `kill_forked_server(pid)` —
+  fork-and-serve so a single-process example or integration
+  test can both serve and connect to itself, with the parent
+  process retaining the handle.
+
+`flare.utils` exposes the POSIX FFI thunks Mojo stdlib doesn't:
+`fork` / `waitpid` / `kill` / `usleep` / `exit` / `getpid` +
+`SIGKILL` / `SIGTERM` / `SIGINT`.
+
 Tests under [`tests/`](../tests/) mirror the package layout:
 `tests/{crypto,dns,http,http2,net,runtime,tcp,testing,tls,udp,uds,ws}/`.
 
