@@ -394,21 +394,20 @@ What jumps out:
 
 - **flare_mc** (handler path) posts the best median p99 of
   the 4-worker pack at `2.63 ms`, edging hyper (`2.83 ms`)
-  and matching axum (`2.80 ms`) while running on Mojo
-  against three production-hardened Rust stacks. The σ on
-  flare_mc's tail (`17–50 ms` across the 5×30 s runs at
-  p99 / p99.9 / p99.99) is larger than axum's flat σ but
-  smaller than hyper's at p99.99 — one of the five
-  measurement runs brushed the working-envelope edge while
-  the other four landed clean. The headline tightened by
-  `+1.1 %` over the prior baseline (`212,246` → `214,567`
-  req/s) after eliminating a redundant UTF-8 validation
-  pass on the H1 parser's ASCII artifacts (`Method` /
-  `Path` / `Version` / header names + values are already
-  RFC 7230-validated by the byte-level parser before
-  string materialisation). This is the row we hand
-  operators when steady-state tail predictability matters
-  more than headline throughput.
+  and matching axum (`2.80 ms`). The σ on flare_mc's tail
+  (`17–50 ms` across the 5×30 s runs at p99 / p99.9 /
+  p99.99) is larger than axum's flat σ but smaller than
+  hyper's at p99.99 — one of the five measurement runs
+  brushed the working-envelope edge while the other four
+  landed clean. The headline tightened by `+1.1 %` over
+  the prior baseline (`212,246` → `214,567` req/s) after
+  eliminating a redundant UTF-8 validation pass on the H1
+  parser's ASCII artifacts (`Method` / `Path` / `Version`
+  / header names + values are already RFC 7230-validated
+  by the byte-level parser before string materialisation).
+  This is the row we hand operators when steady-state
+  tail predictability matters more than headline
+  throughput.
 - **flare_mc_static** still leads on req/s of the
   multi-worker fixed-response fast paths (`247k req/s`,
   ~13 % under actix_web's new headline). Its p99 median is
@@ -433,14 +432,12 @@ What jumps out:
   caught the steady-state shape underneath.
 - **axum** is the steadiest of the pack: `195k req/s` with
   `σ ≤ 0.02 ms` at every tail percentile — flat at the
-  cost of being the lowest headline of the four. It's the
-  row you compare against when you want to know what an
-  in-envelope p99 distribution looks like at the same
-  load.
-- **hyper** is the reference baseline — its v0.8 numbers
-  (`216k req/s`, `2.83 ms` p99 median) move within
-  `±0.5 %` of the prior measurement, which is what we
-  want from the harness's calibration: the same Rust
+  cost of being the lowest headline of the four. Use it
+  as the reference for what an in-envelope p99
+  distribution looks like at this load.
+- **hyper** is the reference baseline — its current
+  numbers (`216k req/s`, `2.83 ms` p99 median) move within
+  `±0.5 %` of the prior measurement, so the same Rust
   binary under the same Linux kernel returns the same
   throughput run-over-run.
 - The harness's σ% column shows req/s itself is rock-steady
@@ -505,14 +502,13 @@ point: both at `~77-79k req/s`, identical median p99 of
 The `2,145 req/s` gap between them (`79,028 - 76,883`)
 sits inside the combined `1σ` envelope of the two runs
 (`√(1241² + 976²) ≈ 1,579 req/s`, so the gap is `~1.36σ`
--- inside `2σ`, outside `1σ`). For framing, nginx 1w
-itself drifted by `3,356 req/s` between the v0.7 and v0.8
-measurement runs of the same binary (`80,239` → `76,883`,
-a `-4.2 %` move that's `2.66σ` apart from itself), which
-is *larger* than the v0.8 flare-vs-nginx gap in either
-direction. The honest read is "statistically
-indistinguishable at single-core plaintext load," not
-"flare leads."
+-- inside `2σ`, outside `1σ`). nginx 1w itself drifted by
+`3,356 req/s` between the prior and current measurement
+runs of the same binary (`80,239` → `76,883`, a `-4.2 %`
+move that's `2.66σ` apart from itself), which is *larger*
+than the current flare-vs-nginx gap in either direction.
+Statistically indistinguishable at single-core plaintext
+load.
 
 What did move decisively is **the flare-side measurement**:
 `71,619` → `79,028 req/s` is a `+10.3 %` headline jump on
@@ -526,12 +522,13 @@ throughput. The p99.9 / p99.99 medians moved from
 `3.30` / `3.43 ms` to `3.84` / `4.30 ms`, but the σ at
 p99.99 tightened from `5.67 ms` to `0.51 ms` -- the
 previous run had one of 5 measurement rounds brush the
-cliff (which is what the v0.7 `5.67 ms` σ was telling
-you); this run's σ says all 5 rounds landed clean inside
-the working envelope. vs Go `net/http` at the same
-worker count: `1.96×` the throughput (was `1.78×` in v0.7)
-with comparable tail medians (Go's `3.21 / 3.60 / 4.40 ms`
-at p99 / p99.9 / p99.99 vs flare's `3.23 / 3.84 / 4.30 ms`).
+cliff (matching what the prior `5.67 ms` σ already
+flagged); this run's σ says all 5 rounds landed clean
+inside the working envelope. vs Go `net/http` at the same
+worker count: `1.96×` the throughput (was `1.78×` in the
+prior measurement) with comparable tail medians (Go's
+`3.21 / 3.60 / 4.40 ms` at p99 / p99.9 / p99.99 vs flare's
+`3.23 / 3.84 / 4.30 ms`).
 
 Source data: [`benchmark/results/2026-05-27T2256-ehsan-dev-03e55f2/`](../benchmark/results/2026-05-27T2256-ehsan-dev-03e55f2/).
 Prior baseline (v0.7 numbers carried through until this
