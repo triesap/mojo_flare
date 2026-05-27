@@ -32,8 +32,8 @@ def main() raises:
 One reactor per worker (``kqueue`` on macOS, ``epoll`` on
 Linux, opt-in ``io_uring`` on Linux >= 6.0 via
 ``FLARE_BUFRING_HANDLER=1``), a ``Handler`` trait that takes plain ``def`` functions
-or compiled-down structs, an RFC 7230 parser fuzzed across 24
-harnesses, and a ``Cancel`` token plumbed to handlers via
+or compiled-down structs, an RFC 7230 parser exercised by 35
+fuzz harnesses (8M+ runs combined, zero known crashes), and a ``Cancel`` token plumbed to handlers via
 ``CancelHandler``. ``num_workers=1`` is a single-threaded
 reactor; ``num_workers=N`` with ``N >= 2`` runs N pthread
 workers behind per-worker ``SO_REUSEPORT`` listeners by default
@@ -66,12 +66,27 @@ HMAC-SHA256 signed cookies, and typed ``Session[T]`` stores.
 
 ```
 flare.io       - BufReader
-flare.ws       - WebSocket client + server (RFC 6455, permessage-deflate,
-                 WS-over-h2 via RFC 8441 Extended CONNECT)
-flare.http2    - HTTP/2 frame codec + HPACK + h2c upgrade (RFC 9113 / 7541)
+flare.ws       - WebSocket client + server (RFC 6455, permessage-deflate
+                 with context-takeover, WS-over-h2 via RFC 8441
+                 Extended CONNECT)
+flare.http2    - HTTP/2 frame codec + HPACK (with table-driven Huffman
+                 fast decoder) + h2c upgrade (RFC 9113 / 7541)
 flare.http     - HTTP/1.1 client + reactor server + Router / App /
-                 extractors + middleware + Cors + FileServer +
-                 forms + cookies + sessions + content-encoding
+                 extractors + middleware (Logger / RequestId / Compress /
+                 Cors / Retry / Timeout / Conditional) + FileServer +
+                 forms + cookies + sessions + content-encoding + SSE
+                 + template engine with {% block %} / {% extends %}
+                 inheritance + sans-I/O parser sublayer under
+                 flare.http.proto.*
+flare.http.cache - RFC 9111 cache primitives (CacheControl directive
+                 parser, CacheKey, InMemoryCacheStore)
+flare.grpc     - gRPC primitives on flare.http2: LPM message framing,
+                 canonical Status codes, Metadata carrier
+flare.openapi  - OpenAPI 3.1 spec model + deterministic JSON emitter
+flare.quic     - Sans-I/O QUIC v1 codec primitives (varint + long /
+                 short packet headers); reactor + TLS + CC drive
+                 ship later alongside the QUIC server
+flare.h3       - Sans-I/O HTTP/3 frame codec + SETTINGS payload
 flare.crypto   - HMAC-SHA256, base64url
 flare.tls      - TLS 1.2/1.3 (OpenSSL, client + server, ALPN, session resumption)
 flare.tcp      - TcpStream + TcpListener (IPv4 + IPv6)
@@ -82,8 +97,8 @@ flare.net      - IpAddr, SocketAddr, RawSocket
 flare.runtime  - Reactor (kqueue / epoll, opt-in io_uring on Linux),
                  TimerWheel, Scheduler, HandoffQueue +
                  WorkerHandoffPool, BufferPool, vectored I/O
-flare.testing  - fork-and-serve helpers for cookbook examples and
-                 integration tests
+flare.testing  - TestClient[H] (in-process handler exerciser) +
+                 fork_server / kill_forked_server for integration tests
 flare.utils    - POSIX FFI thunks (fork / waitpid / kill / usleep /
                  exit / getpid) the Mojo stdlib doesn't expose yet
 ```

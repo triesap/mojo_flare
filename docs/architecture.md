@@ -54,23 +54,35 @@ flare.http     HTTP/1.1 client + reactor server + Handler / Router / App
                under conformance/h1/ + conformance/ws/.
                Template engine with single-level inheritance via
                {% block %} + {% extends %}. RFC 9111 cache
-               middleware (Cache[Inner, S] + InMemoryCacheStore +
-               FilesystemCacheStore). Router is Copyable
+               primitives -- CacheControl directive parser,
+               CacheKey + Vary-aware keying, bounded LRU
+               InMemoryCacheStore (the unified Cache[Inner, S]
+               middleware wrapper + FilesystemCacheStore land
+               on top of these primitives later). Router is Copyable
                (refcounted struct-handler list) and resolves the
                multi-worker overload directly.
-flare.grpc     gRPC layer on the flare.http2 reactor: framing
-               + Status + Metadata, unary + 3 streaming shapes
-               (server + client), per-stream Cancel + grpc-
-               timeout, proto3 codegen, grpc-go interop subset.
-flare.openapi  Comptime spec generator from ComptimeRouter +
-               JSON Schema 2020-12 + serve_openapi + Swagger
-               UI mount.
-flare.quic     Sans-I/O QUIC v1 codec primitives (no reactor /
-               TLS FFI / congestion control -- those land in
-               v0.9 alongside the QUIC server).
-flare.h3       Sans-I/O HTTP/3 frame codec (codec only; full
-               server lives with the QUIC reactor in v0.9).
-flare.qpack    Sans-I/O QPACK encoder + decoder.
+flare.grpc     gRPC primitives on the flare.http2 reactor:
+               length-prefixed message framing, canonical
+               Status codes, Metadata carrier (binary / text
+               key discipline).  Service / stub generation +
+               streaming call shapes + grpc-go interop subset
+               ship in a later release on top of these
+               primitives.
+flare.openapi  OpenAPI 3.1 spec model + deterministic JSON
+               emitter (stable key order for diffable specs).
+               Auto-derivation from ComptimeRouter +
+               serve_openapi + Swagger UI mount ship later.
+flare.quic     Sans-I/O QUIC v1 codec primitives -- variable-
+               length integer codec (RFC 9000 §16), long /
+               short packet header codec (RFC 9000 §17), no
+               reactor / TLS FFI / congestion control (those
+               land alongside the QUIC server in a later
+               release).
+flare.h3       Sans-I/O HTTP/3 frame codec + SETTINGS payload
+               (RFC 9114 §7).  Codec only; full server lives
+               with the QUIC reactor in a later release.
+               QPACK encoder + decoder land alongside the
+               server.
 flare.crypto   HMAC-SHA256, base64url codec
 flare.tls      TLS 1.2/1.3 (OpenSSL); TlsAcceptor + ALPN +
                session resumption (RFC 5077 tickets / RFC 8446

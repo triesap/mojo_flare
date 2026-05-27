@@ -79,7 +79,7 @@ runs at every release tag.
 - Property tests on the timer wheel, headers, auth, WebSocket
   round-trip
 
-34 harnesses, 8M+ runs combined, zero crashes to date.
+35 harnesses, 8M+ runs combined, zero crashes to date.
 
 ---
 

@@ -32,7 +32,7 @@ def main() raises:
 - **Composable by types, not callbacks:** `Handler` is a trait. `Router`, `App[S]`, middleware, and typed extractors (`PathInt`, `QueryInt`, `Form[T]`, `Json[T]`, `Cookies`) compose by nesting structs. The compiler monomorphises the handler chain into one direct call sequence per request type — no virtual dispatch through the chain.
 - **Hard to misuse under load:** Per-request `Cancel` tokens, graceful drain, sanitized 4xx/5xx, TLS cert reload, structured logging, Prometheus metrics. A `TestClient[H]` drives handlers in-process without binding a port for fast unit tests.
 - **Fast, with a tight tail:** Thread-per-core reactor (`kqueue` / `epoll`, opt-in `io_uring`). On a 4-worker plaintext bench, flare's handler path posts the best median p99 of the pack against `hyper` / `axum` / `actix_web`. [Numbers below.](#performance)
-- **Fuzzed:** 34 fuzz harnesses, 8M+ runs, zero known crashes. ASan and assert-mode coverage on every FFI boundary.
+- **Fuzzed:** 35 fuzz harnesses, 8M+ runs, zero known crashes. ASan and assert-mode coverage on every FFI boundary.
 
 ## Install
 
@@ -321,7 +321,7 @@ Each layer imports only from layers below it. No circular dependencies. The full
 
 ## Security
 
-Per-layer security posture and the sanitised-error-response policy live in [`docs/security.md`](docs/security.md). Highlights: RFC 7230 token validation, configurable size limits, sanitised 4xx/5xx bodies, TLS 1.2+ only, WebSocket frame masking + UTF-8 validation, 34 fuzz harnesses with 8M+ runs and zero known crashes.
+Per-layer security posture and the sanitised-error-response policy live in [`docs/security.md`](docs/security.md). Highlights: RFC 7230 token validation, configurable size limits, sanitised 4xx/5xx bodies, TLS 1.2+ only, WebSocket frame masking + UTF-8 validation, 35 fuzz harnesses with 8M+ runs and zero known crashes.
 
 For security issues, please open a private security advisory on GitHub or email the maintainer directly.
 
@@ -349,7 +349,7 @@ Common tasks (run with `pixi run [--environment <env>] <task>`):
 | `tests` | `default` | Full unit + integration suite plus every example under [`examples/`](examples/) |
 | `format-check` / `format` | `default` / `dev` | `mojo format` over `flare`, `tests`, `benchmark`, `examples`, `fuzz` |
 | `docs` / `docs-build` | `dev` | mojodoc-rendered package docstring (live or static) |
-| `fuzz-all` | `fuzz` | Every harness in [`fuzz/`](fuzz/) (34 harnesses, 8M+ runs combined) |
+| `fuzz-all` | `fuzz` | Every harness in [`fuzz/`](fuzz/) (35 harnesses, 8M+ runs combined) |
 | `fuzz-<name>` / `prop-<name>` | `fuzz` | Single harness — see [`pixi.toml`](pixi.toml) for the full list |
 | `bench-vs-baseline-quick` | `bench` | flare vs Go `net/http`, throughput config (~7 min) |
 | `bench-vs-baseline` | `bench` | flare vs all baselines (Go, nginx, hyper, axum, actix_web), all configs |
@@ -361,7 +361,7 @@ Common tasks (run with `pixi run [--environment <env>] <task>`):
 
 ```bash
 pixi run tests                                          # full suite + every example under examples/
-pixi run --environment fuzz fuzz-all                    # 34 harnesses
+pixi run --environment fuzz fuzz-all                    # 35 harnesses
 pixi run --environment bench bench-vs-baseline-quick    # ~7 min
 ```
 
