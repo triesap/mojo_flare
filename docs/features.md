@@ -124,6 +124,8 @@ by nesting structs:
 | `Cors[Inner]` + `CorsConfig` | WHATWG Fetch CORS protocol; permissive / allowlist / preflight short-circuit / credentials echo / exposed-headers / max-age | [`cors.mojo`](../examples/intermediate/cors.mojo) |
 | `Conditional[Inner]` | RFC 9110 §13 preconditions: `If-Match` / `If-None-Match` (304 / 412), `If-Modified-Since` / `If-Unmodified-Since`; opt-in auto-ETag from FNV-1a body hash via `Conditional.with_auto_etag` | `flare.http.conditional` |
 | `FileServer.new(root)` | Static file serving with GET / HEAD + RFC 9110 §14.4 single-Range, MIME inference, path safety (`..` / NUL / absolute path rejection), `index.html` directory fall-through | [`static_files.mojo`](../examples/intermediate/static_files.mojo) |
+| `Retry[Inner]` + `RetryPolicy` | Re-invoke the inner handler up to `max_attempts` times on 5xx; idempotent-method gate on by default (GET / HEAD / PUT / DELETE / OPTIONS retry; POST / PATCH pass through once unless `retry_only_idempotent` is `False`) | [`reliability.mojo`](../examples/intermediate/reliability.mojo) |
+| `TimeoutMiddleware[Inner]` (`flare.http.Timeout`) | Bound the inner handler's wall-clock time; on overrun, the response is replaced with a sanitised 504; `budget_ms <= 0` is the explicit "disabled" sentinel that always trips 504 | [`reliability.mojo`](../examples/intermediate/reliability.mojo) |
 | `negotiate_encoding(Accept-Encoding) -> Encoding` | RFC 9110 §12.5.3 q-value parser exposed for direct use | `flare.http.middleware` |
 
 ## Cookies, sessions, auth
