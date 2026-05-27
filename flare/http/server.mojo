@@ -1244,7 +1244,7 @@ def _parse_http_request_bytes(
     if interned:
         method = interned.value()
     else:
-        method = String(String(unsafe_from_utf8=req_line.as_bytes()[:sp1]))
+        method = _ascii_unchecked_string(req_line.as_bytes()[:sp1])
 
     var sp2 = -1
     for i in range(sp1 + 1, req_line.byte_length()):
@@ -1254,15 +1254,11 @@ def _parse_http_request_bytes(
     var path: String
     var version: String
     if sp2 < 0:
-        path = String(String(unsafe_from_utf8=req_line.as_bytes()[sp1 + 1 :]))
+        path = _ascii_unchecked_string(req_line.as_bytes()[sp1 + 1 :])
         version = "HTTP/1.1"
     else:
-        path = String(
-            String(unsafe_from_utf8=req_line.as_bytes()[sp1 + 1 : sp2])
-        )
-        version = String(
-            String(unsafe_from_utf8=req_line.as_bytes()[sp2 + 1 :])
-        )
+        path = _ascii_unchecked_string(req_line.as_bytes()[sp1 + 1 : sp2])
+        version = _ascii_unchecked_string(req_line.as_bytes()[sp2 + 1 :])
 
     if path.byte_length() > max_uri_length:
         raise Error(
@@ -1413,7 +1409,7 @@ def _parse_http_request_bytes_minimal(
     if interned:
         method = interned.value()
     else:
-        method = String(String(unsafe_from_utf8=req_line.as_bytes()[:sp1]))
+        method = _ascii_unchecked_string(req_line.as_bytes()[:sp1])
 
     var sp2 = -1
     for i in range(sp1 + 1, req_line.byte_length()):
@@ -1423,15 +1419,11 @@ def _parse_http_request_bytes_minimal(
     var path: String
     var version: String
     if sp2 < 0:
-        path = String(String(unsafe_from_utf8=req_line.as_bytes()[sp1 + 1 :]))
+        path = _ascii_unchecked_string(req_line.as_bytes()[sp1 + 1 :])
         version = "HTTP/1.1"
     else:
-        path = String(
-            String(unsafe_from_utf8=req_line.as_bytes()[sp1 + 1 : sp2])
-        )
-        version = String(
-            String(unsafe_from_utf8=req_line.as_bytes()[sp2 + 1 :])
-        )
+        path = _ascii_unchecked_string(req_line.as_bytes()[sp1 + 1 : sp2])
+        version = _ascii_unchecked_string(req_line.as_bytes()[sp2 + 1 :])
 
     if path.byte_length() > max_uri_length:
         raise Error(
@@ -1520,8 +1512,10 @@ def _read_line_buf(data: Span[UInt8, _], mut pos: Int) -> String:
         return String("")
 
     if not has_bad:
-        # Fast path — pure ASCII, one-shot construction.
-        return String(unsafe_from_utf8=data[start:stop])
+        # Fast path — pure ASCII, one-shot construction without
+        # UTF-8 validation (the byte-scan above already proved
+        # every byte is < 0x80).
+        return _ascii_unchecked_string(data[start:stop])
 
     # Slow path: copy bytes, replacing bad ones with '?'.
     var out = String(capacity=stop - start)
@@ -1823,6 +1817,33 @@ def _append_int(mut buf: List[UInt8], var n: Int):
 
 
 @always_inline
+def _ascii_unchecked_string(span: Span[UInt8, _]) -> String:
+    """Construct a ``String`` from ASCII bytes without UTF-8 validation.
+
+    ``String(unsafe_from_utf8=span)`` in Mojo 1.0.0b1 unconditionally
+    runs ``_is_valid_utf8_runtime`` even though the constructor name
+    suggests it skips validation -- a ``perf record`` on the H1
+    plaintext bench surfaced ``_is_valid_utf8_runtime`` as the single
+    hottest user-space symbol (~5% of CPU). This helper allocates an
+    uninitialised ``String`` of the exact length and memcpy's the
+    bytes directly into its buffer, sidestepping the validator
+    entirely.
+
+    Caller contract: the bytes MUST already be valid ASCII (< 0x80).
+    HTTP/1.1 wire artefacts -- method, URL, version, header name,
+    header value -- all satisfy this via the RFC 7230 token / VCHAR
+    checks the parser already runs upstream; we never get here with
+    a non-ASCII byte.
+    """
+    var n = len(span)
+    if n == 0:
+        return String("")
+    var s = String(unsafe_uninit_length=n)
+    memcpy(dest=s.unsafe_ptr_mut(), src=span.unsafe_ptr(), count=n)
+    return s^
+
+
+@always_inline
 def _ascii_strip_slice(span: Span[UInt8, _]) -> String:
     """Return an owned ``String`` equal to ``span`` with ASCII whitespace
     (SPACE and HTAB) trimmed from both ends.
@@ -1830,7 +1851,8 @@ def _ascii_strip_slice(span: Span[UInt8, _]) -> String:
     Replaces the ``String(String(unsafe_from_utf8=...)).strip()`` triple
     that previously allocated three ``String`` objects per header
     half. The fast path does a single pointer-based construction of
-    the final owned ``String`` from the trimmed sub-span.
+    the final owned ``String`` from the trimmed sub-span via the
+    ``_ascii_unchecked_string`` helper (no UTF-8 validation).
     """
     var n = len(span)
     var start = 0
@@ -1847,7 +1869,7 @@ def _ascii_strip_slice(span: Span[UInt8, _]) -> String:
         stop -= 1
     if stop <= start:
         return String("")
-    return String(unsafe_from_utf8=span[start:stop])
+    return _ascii_unchecked_string(span[start:stop])
 
 
 @always_inline
@@ -1872,17 +1894,16 @@ def _ascii_lower(s: String) -> String:
             has_upper = True
             break
     if not has_upper:
-        return String(unsafe_from_utf8=s.as_bytes())
-    var buf = List[UInt8]()
-    buf.resize(n, UInt8(0))
-    var dst = buf.unsafe_ptr()
+        return _ascii_unchecked_string(s.as_bytes())
+    var out = String(unsafe_uninit_length=n)
+    var dst = out.unsafe_ptr_mut()
     for i in range(n):
         var c = src[i]
         if c >= 65 and c <= 90:
             dst[i] = c + 32
         else:
             dst[i] = c
-    return String(unsafe_from_utf8=Span[UInt8, _](buf))
+    return out^
 
 
 def _status_reason(code: Int) -> String:
