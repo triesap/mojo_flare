@@ -739,6 +739,15 @@ from .http.cache import (
     derive_cache_key,
     parse_cache_control,
 )
+from .openapi import (
+    OpenApiInfo,
+    OpenApiOperation,
+    OpenApiParameter,
+    OpenApiPath,
+    OpenApiResponse,
+    OpenApiSpec,
+    emit_openapi_json,
+)
 from .http.cors import Cors, CorsConfig
 from .http.fs import ByteRange, FileServer, parse_range
 from .http.error import HttpError, TooManyRedirects
