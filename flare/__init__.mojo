@@ -750,13 +750,16 @@ from .http.middleware import (
     negotiate_encoding,
 )
 from .http.cache import (
+    Cache,
     CacheControl,
     CacheEntry,
     CacheKey,
     CacheStore,
     InMemoryCacheStore,
     derive_cache_key,
+    is_fresh as cache_is_fresh,
     parse_cache_control,
+    parse_vary_header,
 )
 from .openapi import (
     OpenApiInfo,

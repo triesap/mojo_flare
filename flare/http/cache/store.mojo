@@ -81,7 +81,7 @@ struct CacheEntry(Copyable, Movable):
         )
 
 
-trait CacheStore(Copyable, Movable):
+trait CacheStore(Copyable, Defaultable, Movable):
     """Persistence interface for cached responses.
 
     Implementations must accept concurrent reads/writes from the

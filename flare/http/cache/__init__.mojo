@@ -29,6 +29,7 @@ from .control import (
     parse_vary_header,
 )
 from .key import CacheKey, derive_cache_key
+from .middleware import Cache
 from .store import (
     CacheEntry,
     CacheStore,
