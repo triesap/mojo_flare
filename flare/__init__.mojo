@@ -1,4 +1,4 @@
-"""flare -- a Mojo full networking stack in one library.
+"""``flare`` -- a Mojo full networking stack in one library.
 
 HTTP/1.1 + HTTP/2 server and client, WebSocket server and
 client (RFC 6455), TLS 1.2/1.3 (OpenSSL with ALPN), TCP, UDP,

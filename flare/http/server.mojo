@@ -802,28 +802,27 @@ struct HttpServer(Movable):
     def serve_cancellable[
         CH: CancelHandler
     ](mut self, var handler: CH,) raises:
-        """Run the cancel-aware reactor loop with a ``CancelHandler``
-        .
+        """Run the cancel-aware reactor loop with a ``CancelHandler``.
 
-         Single-threaded entry point; the multicore variant lands in a
-         future commit. The reactor allocates one ``CancelCell`` per
-         connection, hands a ``Cancel`` handle bound to it into
-         ``handler.serve(req, cancel)``, and flips the cell on:
+        Single-threaded entry point; the multicore variant lands in a
+        future commit. The reactor allocates one ``CancelCell`` per
+        connection, hands a ``Cancel`` handle bound to it into
+        ``handler.serve(req, cancel)``, and flips the cell on:
 
-         - ``CancelReason.PEER_CLOSED`` — peer FIN observed before the
-           response was queued.
-         - ``CancelReason.TIMEOUT`` — wired in commit 5 of .
-         - ``CancelReason.SHUTDOWN`` — wired in commit 6 of .
+        - ``CancelReason.PEER_CLOSED`` — peer FIN observed before the
+          response was queued.
+        - ``CancelReason.TIMEOUT`` — wired in a later commit.
+        - ``CancelReason.SHUTDOWN`` — wired in a later commit.
 
-         For plain ``Handler``s that don't observe cancellation, wrap
-         with ``WithCancel[H](inner=h)`` to plug them into this entry
-         point unchanged.
+        For plain ``Handler``s that don't observe cancellation, wrap
+        with ``WithCancel[H](inner=h)`` to plug them into this entry
+        point unchanged.
 
-         Args:
-             handler: Cancel-aware request handler (ownership transferred).
+        Args:
+            handler: Cancel-aware request handler (ownership transferred).
 
-         Raises:
-             NetworkError: On fatal listener errors.
+        Raises:
+            NetworkError: On fatal listener errors.
         """
         from ._server_reactor_impl import run_reactor_loop_cancel
 
@@ -835,32 +834,31 @@ struct HttpServer(Movable):
     def serve_view[
         VH: ViewHandler
     ](mut self, var handler: VH,) raises:
-        """Run the view-aware reactor loop with a ``ViewHandler``
-        .
+        """Run the view-aware reactor loop with a ``ViewHandler``.
 
-         Single-threaded entry point. Per-request the reactor:
+        Single-threaded entry point. Per-request the reactor:
 
-         1. Reads bytes into ``ConnHandle.read_buf``.
-         2. Parses the request as a ``RequestView`` borrowing into
-            ``read_buf`` (no per-header String alloc, no body copy).
-         3. Dispatches into ``handler.serve_view(view, cancel)`` —
-            ``view.body()`` returns ``Span[UInt8, origin]`` directly.
-         4. Serialises the response and resets ``read_buf`` for
-            the next pipelined request.
+        1. Reads bytes into ``ConnHandle.read_buf``.
+        2. Parses the request as a ``RequestView`` borrowing into
+           ``read_buf`` (no per-header String alloc, no body copy).
+        3. Dispatches into ``handler.serve_view(view, cancel)`` —
+           ``view.body()`` returns ``Span[UInt8, origin]`` directly.
+        4. Serialises the response and resets ``read_buf`` for
+           the next pipelined request.
 
-         Use this entry point for handlers that benefit from
-         zero-copy reads — multipart upload parsers, large-body
-         echos, anything that scans the body without re-encoding
-         it. For ``Handler.serve(req: Request)`` plug-in,
-         wrap with ``WithViewCancel[H](inner=h)`` (the adapter
-         does ``view.into_owned()`` and forwards).
+        Use this entry point for handlers that benefit from
+        zero-copy reads — multipart upload parsers, large-body
+        echos, anything that scans the body without re-encoding
+        it. For ``Handler.serve(req: Request)`` plug-in,
+        wrap with ``WithViewCancel[H](inner=h)`` (the adapter
+        does ``view.into_owned()`` and forwards).
 
-         Args:
-             handler: View-aware request handler (ownership
-                 transferred).
+        Args:
+            handler: View-aware request handler (ownership
+                transferred).
 
-         Raises:
-             NetworkError: On fatal listener errors.
+        Raises:
+            NetworkError: On fatal listener errors.
         """
         from ._server_reactor_impl import run_reactor_loop_view
 

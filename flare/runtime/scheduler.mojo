@@ -397,18 +397,8 @@ struct Scheduler[H: Handler & Copyable](Movable):
     ) raises -> Scheduler[Self.H]:
         """Spawn ``num_workers`` threads sharing one listener.
 
-        Args (in addition to the existing ones):
-            unified: When ``True``, every worker dispatches to
-                :func:`flare.http._unified_reactor_impl.run_unified_reactor_loop_shared`
-                (auto HTTP/1.1 + HTTP/2 dispatch). When ``False``
-                (default), uses the legacy HTTP/1.1-only loop --
-                preserves byte-for-byte the v0.6/v0.7 behaviour
-                for callers that haven't opted in.
-            h2_config: HTTP/2 SETTINGS used by the unified path.
-                Ignored when ``unified`` is ``False``.
-
-        redesign: the scheduler binds a single ``TcpListener``
-        (via ``bind_shared``) and hands its fd to every worker. Each
+        The scheduler binds a single ``TcpListener`` (via
+        ``bind_shared``) and hands its fd to every worker. Each
         worker registers the fd with ``Reactor.register_exclusive``
         so the kernel wakes only one worker per accept event
         (``EPOLLEXCLUSIVE`` on Linux >= 4.5). On macOS the flag is
@@ -429,6 +419,13 @@ struct Scheduler[H: Handler & Copyable](Movable):
                 ``pthread_create`` + heap allocation.
             pin_cores: If ``True`` (default), pin worker N to core
                 ``N % num_cpus``. No-op on macOS.
+            auto_protocol: When ``True``, every worker dispatches
+                through the unified HTTP/1.1 + HTTP/2 reactor loop
+                (preface peek selects the protocol per connection).
+                When ``False`` (default), uses the HTTP/1.1-only
+                loop.
+            h2_config: HTTP/2 SETTINGS used by the unified path.
+                Ignored when ``auto_protocol`` is ``False``.
 
         Returns:
             A running ``Scheduler`` whose workers will continue to

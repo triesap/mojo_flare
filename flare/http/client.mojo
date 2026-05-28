@@ -153,6 +153,11 @@ struct HttpClient(Movable):
             prefer_h2c: When ``True``, ``http://`` requests speak
                 HTTP/2 over cleartext via prior knowledge. ``https://``
                 requests always negotiate via ALPN regardless.
+            h2c_upgrade: When ``True``, ``http://`` requests issue an
+                HTTP/1.1 ``Upgrade: h2c`` handshake (RFC 7540 §3.2)
+                instead of using prior knowledge; the connection switches
+                to HTTP/2 only if the server returns ``101 Switching
+                Protocols``, otherwise it stays on HTTP/1.1.
         """
         self._config = TlsConfig()
         self._max_redirects = max_redirects

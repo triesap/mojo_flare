@@ -441,7 +441,12 @@ struct UringReactor(Movable):
                 ``SINGLE_ISSUER | DEFER_TASKRUN`` so the kernel
                 batches task work to enter boundaries instead
                 of running it IPI-style mid-syscall.
-            sq_thread_cpu / sq_thread_idle: SQPOLL knobs;
+            sq_thread_cpu: SQPOLL CPU affinity (CPU id the
+                kernel pins the SQPOLL thread to); ignored
+                unless ``setup_flags`` includes
+                ``IORING_SETUP_SQPOLL``.
+            sq_thread_idle: SQPOLL idle timeout in milliseconds
+                before the kernel parks the SQPOLL thread;
                 ignored unless ``setup_flags`` includes
                 ``IORING_SETUP_SQPOLL``.
             enable_wakeup: Default True (the historical

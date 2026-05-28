@@ -365,9 +365,12 @@ struct IoUringDriver(Movable):
                 historical interrupt-driven, unbatched behaviour.
                 See :data:`flare.runtime.io_uring_sqe.IORING_SETUP_COOP_TASKRUN`
                 etc. for the bufring path's optimal mix.
-            sq_thread_cpu / sq_thread_idle: SQPOLL knobs;
-                ignored unless ``setup_flags`` includes
-                ``IORING_SETUP_SQPOLL``.
+            sq_thread_cpu: SQPOLL CPU affinity (CPU id the kernel
+                pins the SQPOLL thread to); ignored unless
+                ``setup_flags`` includes ``IORING_SETUP_SQPOLL``.
+            sq_thread_idle: SQPOLL idle timeout in milliseconds
+                before the kernel parks the SQPOLL thread; ignored
+                unless ``setup_flags`` includes ``IORING_SETUP_SQPOLL``.
 
         Raises:
             Error: On ``io_uring_setup`` failure or any of the

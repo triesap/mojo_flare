@@ -68,7 +68,7 @@ from ..http.encoding import _find_flare_zlib_lib
 
 
 comptime DEFAULT_DEFLATE_LEVEL: Int = 6
-"""zlib's default compression level (1..9, where 9 is slowest /
+"""``zlib``'s default compression level (1..9, where 9 is slowest /
 densest). Used when :class:`PermessageDeflateConfig` doesn't
 override per-direction."""
 
@@ -128,7 +128,7 @@ struct PermessageDeflateConfig(Copyable, Defaultable, Movable):
     side."""
 
     var compression_level: Int
-    """zlib compression level for outgoing messages (1..9, 0 =
+    """``zlib`` compression level for outgoing messages (1..9, 0 =
     no compression, -1 = zlib default). Defaults to
     :data:`DEFAULT_DEFLATE_LEVEL`."""
 
@@ -211,7 +211,7 @@ def compress_message(
 
     Args:
         data: Plaintext message bytes.
-        level: zlib compression level (1..9; 0 = no compression;
+        level: ``zlib`` compression level (1..9; 0 = no compression;
             -1 = zlib default).
 
     Returns:
@@ -480,7 +480,7 @@ struct PermessageDeflateContext(Movable):
         """Allocate a persistent compressor + decompressor pair.
 
         Args:
-            level: zlib compression level (1..9; 0 = no
+            level: ``zlib`` compression level (1..9; 0 = no
                 compression; -1 = zlib default).
             window_bits: Negative for raw deflate, matching the
                 RFC 7692 §7.1.2.1 negotiated max-window-bits

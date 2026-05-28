@@ -1,4 +1,4 @@
-"""flare.runtime — event-loop primitives for the Stage 1 reactor.
+"""``flare.runtime`` — event-loop primitives for the Stage 1 reactor.
 
 Public exports:
     Reactor, Event, INTEREST_READ, INTEREST_WRITE,

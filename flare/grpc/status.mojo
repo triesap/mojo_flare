@@ -1,4 +1,4 @@
-"""gRPC status codes and trailer carrier.
+"""``gRPC`` status codes and trailer carrier.
 
 A gRPC call ends with a *trailer* header set containing at least
 ``grpc-status`` (a decimal integer 0..16). Successful calls

@@ -2622,7 +2622,7 @@ def run_uring_reactor_loop_static(
     resp: StaticResponse,
     ref stopping: Bool,
 ) raises:
-    """io_uring-backed reactor loop for the static-response path.
+    """``io_uring``-backed reactor loop for the static-response path.
 
     Functional twin of :func:`run_reactor_loop_static` but uses
     :class:`flare.runtime.uring_reactor.UringReactor` for both the

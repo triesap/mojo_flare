@@ -97,11 +97,13 @@ struct ThreadHandle(Movable):
     ](arg: _OpaquePtr,) raises -> ThreadHandle:
         """Spawn a thread that runs ``start(arg)``.
 
-        Args:
+        Parameters:
             start: Entry function. Signature
                 ``fn(UnsafePointer[UInt8]) thin abi("C") -> UnsafePointer[UInt8]``.
                 Must not raise; convert errors into a sentinel return
                 value before returning.
+
+        Args:
             arg: Opaque pointer delivered to the start function.
 
         Returns:

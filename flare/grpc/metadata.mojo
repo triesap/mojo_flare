@@ -1,4 +1,4 @@
-"""gRPC metadata carrier (initial + trailing).
+"""``gRPC`` metadata carrier (initial + trailing).
 
 gRPC metadata is a name-value map carried in HTTP/2 HEADERS
 frames at the start (initial metadata) and after the body

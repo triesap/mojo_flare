@@ -252,7 +252,7 @@ def server_ssl_new_accept(ctx: ServerCtx, fd: Int) raises -> Int:
 
 
 def server_ssl_do_handshake(ctx: ServerCtx, ssl_addr: Int) raises -> Int:
-    """Drive ``SSL_accept`` one step. Returns:
+    """Drive ``SSL_accept`` one step and return the next-step code.
 
     - 0 → handshake complete.
     - 1 → WANT_READ; reactor should re-arm readable interest.

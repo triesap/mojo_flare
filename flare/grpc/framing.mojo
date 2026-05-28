@@ -1,4 +1,4 @@
-"""gRPC length-prefix-message (LPM) framing codec.
+"""``gRPC`` length-prefix-message (LPM) framing codec.
 
 Every gRPC message on the wire is a 5-byte header followed by an
 opaque payload:

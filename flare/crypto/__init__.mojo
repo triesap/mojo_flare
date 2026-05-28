@@ -1,4 +1,4 @@
-"""flare.crypto — minimal cryptographic primitives over the OpenSSL FFI.
+"""``flare.crypto`` — minimal cryptographic primitives over the OpenSSL FFI.
 
 flare relies on OpenSSL 3 for TLS already (see ``flare.tls``); the
 same shared object (``libflare_tls.so``) hosts the few non-TLS

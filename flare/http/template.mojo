@@ -198,7 +198,7 @@ def html_escape(s: String) -> String:
     """Escape ``s`` for safe inclusion in HTML body text or
     attribute values, per OWASP XSS Prevention Cheat Sheet rule
     #1 (body) + rule #2 (attribute). Replaces the five
-    HTML-significant bytes:
+    HTML-significant bytes.
 
     - ``&`` → ``&amp;``
     - ``<`` → ``&lt;``
