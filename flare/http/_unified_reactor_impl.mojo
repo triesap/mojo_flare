@@ -607,6 +607,185 @@ def _accept_loop_unified_fd(
                 pass
 
 
+# ── Shared per-event dispatch + lifecycle helpers ──────────────────────────
+#
+# Closes critique register §B3: the three reactor entry points
+# (run_unified_reactor_loop, _multi, _shared) used to embed three
+# byte-for-byte copies of the same per-event dispatch body
+# (~80 LOC each). Behaviour-preserving extraction collapses
+# them into a single ``_unified_handle_conn_event`` core; the
+# entry points keep their distinct accept-routing (single
+# listener, multi listener, EPOLLEXCLUSIVE-shared listener) and
+# each becomes a ~30-line wrapper that polls + advances timers
+# + delegates per-event dispatch + drains on shutdown.
+
+
+@always_inline
+def _advance_timer_wheel_unified(
+    now_ms: UInt64,
+    mut wheel: TimerWheel,
+    mut conns: Dict[Int, Int],
+    mut timers: Dict[Int, UInt64],
+    mut reactor: Reactor,
+) raises:
+    """Step the timer wheel and reap any connections whose timeout
+    fired this tick.
+
+    Centralises the three-line pattern (advance + iterate fired +
+    cleanup) that was duplicated in every loop variant.
+    """
+    var fired = List[UInt64]()
+    wheel.advance(now_ms, fired)
+    for i in range(len(fired)):
+        var fd_tok = Int(fired[i])
+        _cleanup_conn_unified(fd_tok, conns, timers, reactor)
+
+
+def _unified_handle_conn_event[
+    H: Handler
+](
+    fd: Int,
+    packed: Int,
+    is_readable: Bool,
+    is_writable: Bool,
+    ref handler: H,
+    config: ServerConfig,
+    h2_config: Http2Config,
+    mut conns: Dict[Int, Int],
+    mut reactor: Reactor,
+    mut wheel: TimerWheel,
+    mut timers: Dict[Int, UInt64],
+) raises:
+    """Dispatch one reactor event for an already-known connection fd.
+
+    Caller has filtered out wakeup events and listener-accept
+    events; ``fd`` is in ``conns``; ``packed`` is the tagged
+    pointer pulled from ``conns[fd]``. The body branches on
+    ``_kind(packed)`` exactly the way the three duplicate copies
+    used to: HTTP/1.1 hot path first (most common in production
+    keep-alive workloads), then HTTP/2, then the cold pending
+    (preface-peek) path which migrates to KIND_H1 / KIND_H2 and
+    drives the chosen handle once to consume any prefetched bytes.
+    """
+    var k = _kind(packed)
+
+    # Hot path: HTTP/1.1 keep-alive (the most common kind in
+    # production). Branch first so the optimiser can speculate
+    # the success case.
+    if k == KIND_H1:
+        var done3 = False
+        if is_readable:
+            done3 = _drive_h1(
+                fd,
+                _addr(packed),
+                handler,
+                config,
+                h2_config,
+                conns,
+                reactor,
+                wheel,
+                timers,
+            )
+        elif is_writable:
+            done3 = _drive_h1_writable(
+                fd,
+                _addr(packed),
+                config,
+                reactor,
+                wheel,
+                timers,
+            )
+        if done3:
+            _cleanup_conn_unified(fd, conns, timers, reactor)
+        return
+
+    if k == KIND_H2:
+        var done4 = _drive_h2(
+            fd,
+            _addr(packed),
+            handler,
+            config,
+            is_readable,
+            reactor,
+            wheel,
+            timers,
+        )
+        if done4:
+            _cleanup_conn_unified(fd, conns, timers, reactor)
+        return
+
+    # Cold path: protocol-undecided (PendingConnHandle). Runs at
+    # most once per accepted conn before it promotes to KIND_H1
+    # or KIND_H2 via _migrate_pending.
+    if not is_readable:
+        return
+    var pending_ptr = _pending_conn_ptr_from_int(_addr(packed))
+    var decision: Int
+    try:
+        decision = pending_ptr[].on_readable()
+    except:
+        decision = PROTO_HTTP1
+    if decision == PROTO_NEED_MORE:
+        return
+    var ok = _migrate_pending(fd, decision, h2_config, conns)
+    if not ok:
+        _cleanup_conn_unified(fd, conns, timers, reactor)
+        return
+    # After migration, drive the chosen handle once to consume
+    # any prefetched bytes (e.g. the bytes that arrived after
+    # the 24-byte preface in the same TCP segment).
+    if fd not in conns:
+        return
+    var packed2 = conns[fd]
+    var k2 = _kind(packed2)
+    if k2 == KIND_H2:
+        var done = _drive_h2(
+            fd,
+            _addr(packed2),
+            handler,
+            config,
+            True,
+            reactor,
+            wheel,
+            timers,
+        )
+        if done:
+            _cleanup_conn_unified(fd, conns, timers, reactor)
+    elif k2 == KIND_H1:
+        var done2 = _drive_h1(
+            fd,
+            _addr(packed2),
+            handler,
+            config,
+            h2_config,
+            conns,
+            reactor,
+            wheel,
+            timers,
+        )
+        if done2:
+            _cleanup_conn_unified(fd, conns, timers, reactor)
+
+
+@always_inline
+def _drain_remaining_conns_unified(
+    mut conns: Dict[Int, Int],
+    mut timers: Dict[Int, UInt64],
+    mut reactor: Reactor,
+) raises:
+    """Close every connection still in ``conns``.
+
+    Called from the shutdown tail of each loop variant.
+    Listener fds (when applicable) are not in ``conns`` and are
+    closed by the caller; the loop only borrows them.
+    """
+    var leftover = List[Int]()
+    for kv in conns.items():
+        leftover.append(kv.key)
+    for i in range(len(leftover)):
+        _cleanup_conn_unified(leftover[i], conns, timers, reactor)
+
+
 # ── Unified reactor loop -- single listener (single-worker) ────────────────
 
 
@@ -658,11 +837,7 @@ def run_unified_reactor_loop[
             break
 
         var now_ms = UInt64(_monotonic_ms())
-        var fired = List[UInt64]()
-        wheel.advance(now_ms, fired)
-        for i in range(len(fired)):
-            var fd_tok = Int(fired[i])
-            _cleanup_conn_unified(fd_tok, conns, timers, reactor)
+        _advance_timer_wheel_unified(now_ms, wheel, conns, timers, reactor)
 
         for i in range(len(events)):
             var evt = events[i]
@@ -675,109 +850,22 @@ def run_unified_reactor_loop[
             if fd not in conns:
                 continue
             var packed = conns[fd]
-            var k = _kind(packed)
-
-            # Hot path: HTTP/1.1 keep-alive (the most common kind
-            # in production). Branch first so the optimiser can
-            # speculate the success case.
-            if k == KIND_H1:
-                var done3 = False
-                if evt.is_readable():
-                    done3 = _drive_h1(
-                        fd,
-                        _addr(packed),
-                        handler,
-                        config,
-                        h2_config,
-                        conns,
-                        reactor,
-                        wheel,
-                        timers,
-                    )
-                elif evt.is_writable():
-                    done3 = _drive_h1_writable(
-                        fd,
-                        _addr(packed),
-                        config,
-                        reactor,
-                        wheel,
-                        timers,
-                    )
-                if done3:
-                    _cleanup_conn_unified(fd, conns, timers, reactor)
-                continue
-
-            if k == KIND_H2:
-                var done4 = _drive_h2(
-                    fd,
-                    _addr(packed),
-                    handler,
-                    config,
-                    evt.is_readable(),
-                    reactor,
-                    wheel,
-                    timers,
-                )
-                if done4:
-                    _cleanup_conn_unified(fd, conns, timers, reactor)
-                continue
-
-            # Cold path: protocol-undecided (PendingConnHandle).
-            # Runs at most once per accepted conn before it
-            # promotes to KIND_H1 / KIND_H2.
-            if not evt.is_readable():
-                continue
-            var pending_ptr = _pending_conn_ptr_from_int(_addr(packed))
-            var decision: Int
-            try:
-                decision = pending_ptr[].on_readable()
-            except:
-                decision = PROTO_HTTP1
-            if decision == PROTO_NEED_MORE:
-                continue
-            var ok = _migrate_pending(fd, decision, h2_config, conns)
-            if not ok:
-                _cleanup_conn_unified(fd, conns, timers, reactor)
-                continue
-            # After migration, drive the chosen handle once to
-            # consume any prefetched bytes.
-            if fd in conns:
-                var packed2 = conns[fd]
-                var k2 = _kind(packed2)
-                if k2 == KIND_H2:
-                    var done = _drive_h2(
-                        fd,
-                        _addr(packed2),
-                        handler,
-                        config,
-                        True,
-                        reactor,
-                        wheel,
-                        timers,
-                    )
-                    if done:
-                        _cleanup_conn_unified(fd, conns, timers, reactor)
-                elif k2 == KIND_H1:
-                    var done2 = _drive_h1(
-                        fd,
-                        _addr(packed2),
-                        handler,
-                        config,
-                        h2_config,
-                        conns,
-                        reactor,
-                        wheel,
-                        timers,
-                    )
-                    if done2:
-                        _cleanup_conn_unified(fd, conns, timers, reactor)
+            _unified_handle_conn_event(
+                fd,
+                packed,
+                evt.is_readable(),
+                evt.is_writable(),
+                handler,
+                config,
+                h2_config,
+                conns,
+                reactor,
+                wheel,
+                timers,
+            )
 
     # Graceful shutdown: close all live conns.
-    var leftover = List[Int]()
-    for kv in conns.items():
-        leftover.append(kv.key)
-    for i in range(len(leftover)):
-        _cleanup_conn_unified(leftover[i], conns, timers, reactor)
+    _drain_remaining_conns_unified(conns, timers, reactor)
 
 
 # ── Unified reactor loop -- multi-listener (single-worker) ─────────────────
@@ -862,11 +950,7 @@ def run_unified_reactor_loop_multi[
             break
 
         var now_ms = UInt64(_monotonic_ms())
-        var fired = List[UInt64]()
-        wheel.advance(now_ms, fired)
-        for i in range(len(fired)):
-            var fd_tok = Int(fired[i])
-            _cleanup_conn_unified(fd_tok, conns, timers, reactor)
+        _advance_timer_wheel_unified(now_ms, wheel, conns, timers, reactor)
 
         for i in range(len(events)):
             var evt = events[i]
@@ -879,104 +963,23 @@ def run_unified_reactor_loop_multi[
             if fd not in conns:
                 continue
             var packed = conns[fd]
-            var k = _kind(packed)
-
-            if k == KIND_H1:
-                var done3 = False
-                if evt.is_readable():
-                    done3 = _drive_h1(
-                        fd,
-                        _addr(packed),
-                        handler,
-                        config,
-                        h2_config,
-                        conns,
-                        reactor,
-                        wheel,
-                        timers,
-                    )
-                elif evt.is_writable():
-                    done3 = _drive_h1_writable(
-                        fd,
-                        _addr(packed),
-                        config,
-                        reactor,
-                        wheel,
-                        timers,
-                    )
-                if done3:
-                    _cleanup_conn_unified(fd, conns, timers, reactor)
-                continue
-
-            if k == KIND_H2:
-                var done4 = _drive_h2(
-                    fd,
-                    _addr(packed),
-                    handler,
-                    config,
-                    evt.is_readable(),
-                    reactor,
-                    wheel,
-                    timers,
-                )
-                if done4:
-                    _cleanup_conn_unified(fd, conns, timers, reactor)
-                continue
-
-            # Cold path: pending (preface-peek). Same code shape
-            # as the single-listener loop above.
-            if not evt.is_readable():
-                continue
-            var pending_ptr = _pending_conn_ptr_from_int(_addr(packed))
-            var decision: Int
-            try:
-                decision = pending_ptr[].on_readable()
-            except:
-                decision = PROTO_HTTP1
-            if decision == PROTO_NEED_MORE:
-                continue
-            var ok = _migrate_pending(fd, decision, h2_config, conns)
-            if not ok:
-                _cleanup_conn_unified(fd, conns, timers, reactor)
-                continue
-            if fd in conns:
-                var packed2 = conns[fd]
-                var k2 = _kind(packed2)
-                if k2 == KIND_H2:
-                    var done = _drive_h2(
-                        fd,
-                        _addr(packed2),
-                        handler,
-                        config,
-                        True,
-                        reactor,
-                        wheel,
-                        timers,
-                    )
-                    if done:
-                        _cleanup_conn_unified(fd, conns, timers, reactor)
-                elif k2 == KIND_H1:
-                    var done2 = _drive_h1(
-                        fd,
-                        _addr(packed2),
-                        handler,
-                        config,
-                        h2_config,
-                        conns,
-                        reactor,
-                        wheel,
-                        timers,
-                    )
-                    if done2:
-                        _cleanup_conn_unified(fd, conns, timers, reactor)
+            _unified_handle_conn_event(
+                fd,
+                packed,
+                evt.is_readable(),
+                evt.is_writable(),
+                handler,
+                config,
+                h2_config,
+                conns,
+                reactor,
+                wheel,
+                timers,
+            )
 
     # Graceful shutdown: close all live conns. Listener fds are
     # closed by ``HttpServer.__del__`` -- the loop only borrows.
-    var leftover = List[Int]()
-    for kv in conns.items():
-        leftover.append(kv.key)
-    for i in range(len(leftover)):
-        _cleanup_conn_unified(leftover[i], conns, timers, reactor)
+    _drain_remaining_conns_unified(conns, timers, reactor)
 
 
 # ── Unified reactor loop -- shared listener (multi-worker) ──────────────────
@@ -1019,11 +1022,7 @@ def run_unified_reactor_loop_shared[
             break
 
         var now_ms = UInt64(_monotonic_ms())
-        var fired = List[UInt64]()
-        wheel.advance(now_ms, fired)
-        for i in range(len(fired)):
-            var fd_tok = Int(fired[i])
-            _cleanup_conn_unified(fd_tok, conns, timers, reactor)
+        _advance_timer_wheel_unified(now_ms, wheel, conns, timers, reactor)
 
         for i in range(len(events)):
             var evt = events[i]
@@ -1036,97 +1035,18 @@ def run_unified_reactor_loop_shared[
             if fd not in conns:
                 continue
             var packed = conns[fd]
-            var k = _kind(packed)
+            _unified_handle_conn_event(
+                fd,
+                packed,
+                evt.is_readable(),
+                evt.is_writable(),
+                handler,
+                config,
+                h2_config,
+                conns,
+                reactor,
+                wheel,
+                timers,
+            )
 
-            if k == KIND_H1:
-                var done3 = False
-                if evt.is_readable():
-                    done3 = _drive_h1(
-                        fd,
-                        _addr(packed),
-                        handler,
-                        config,
-                        h2_config,
-                        conns,
-                        reactor,
-                        wheel,
-                        timers,
-                    )
-                elif evt.is_writable():
-                    done3 = _drive_h1_writable(
-                        fd,
-                        _addr(packed),
-                        config,
-                        reactor,
-                        wheel,
-                        timers,
-                    )
-                if done3:
-                    _cleanup_conn_unified(fd, conns, timers, reactor)
-                continue
-
-            if k == KIND_H2:
-                var done4 = _drive_h2(
-                    fd,
-                    _addr(packed),
-                    handler,
-                    config,
-                    evt.is_readable(),
-                    reactor,
-                    wheel,
-                    timers,
-                )
-                if done4:
-                    _cleanup_conn_unified(fd, conns, timers, reactor)
-                continue
-
-            if not evt.is_readable():
-                continue
-            var pending_ptr = _pending_conn_ptr_from_int(_addr(packed))
-            var decision: Int
-            try:
-                decision = pending_ptr[].on_readable()
-            except:
-                decision = PROTO_HTTP1
-            if decision == PROTO_NEED_MORE:
-                continue
-            var ok = _migrate_pending(fd, decision, h2_config, conns)
-            if not ok:
-                _cleanup_conn_unified(fd, conns, timers, reactor)
-                continue
-            if fd in conns:
-                var packed2 = conns[fd]
-                var k2 = _kind(packed2)
-                if k2 == KIND_H2:
-                    var done = _drive_h2(
-                        fd,
-                        _addr(packed2),
-                        handler,
-                        config,
-                        True,
-                        reactor,
-                        wheel,
-                        timers,
-                    )
-                    if done:
-                        _cleanup_conn_unified(fd, conns, timers, reactor)
-                elif k2 == KIND_H1:
-                    var done2 = _drive_h1(
-                        fd,
-                        _addr(packed2),
-                        handler,
-                        config,
-                        h2_config,
-                        conns,
-                        reactor,
-                        wheel,
-                        timers,
-                    )
-                    if done2:
-                        _cleanup_conn_unified(fd, conns, timers, reactor)
-
-    var leftover = List[Int]()
-    for kv in conns.items():
-        leftover.append(kv.key)
-    for i in range(len(leftover)):
-        _cleanup_conn_unified(leftover[i], conns, timers, reactor)
+    _drain_remaining_conns_unified(conns, timers, reactor)
