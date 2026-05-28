@@ -82,10 +82,10 @@ struct InMemoryCacheStore(CacheStore, Copyable, Defaultable, Movable):
         self._entries = List[CacheEntry]()
         self._capacity = 1024
 
-    def __copyinit__(out self, existing: Self):
-        self._keys = existing._keys.copy()
-        self._entries = existing._entries.copy()
-        self._capacity = existing._capacity
+    def __init__(out self, *, copy: Self):
+        self._keys = copy._keys.copy()
+        self._entries = copy._entries.copy()
+        self._capacity = copy._capacity
 
     @staticmethod
     def with_capacity(capacity: Int) -> Self:

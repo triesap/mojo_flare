@@ -528,14 +528,14 @@ struct PermessageDeflateContext(Movable):
         self._level = level
         self._window_bits = window_bits
 
-    def __moveinit__(out self, deinit other: Self):
-        """Transfer ownership; the source is left with null
-        handles so its destructor becomes a no-op."""
-        self._comp_handle = other._comp_handle
-        self._decomp_handle = other._decomp_handle
-        self.max_decompressed_bytes = other.max_decompressed_bytes
-        self._level = other._level
-        self._window_bits = other._window_bits
+    def __init__(out self, *, deinit take: Self):
+        """Transfer ownership; the source is consumed via
+        ``deinit`` so its destructor is never invoked."""
+        self._comp_handle = take._comp_handle
+        self._decomp_handle = take._decomp_handle
+        self.max_decompressed_bytes = take.max_decompressed_bytes
+        self._level = take._level
+        self._window_bits = take._window_bits
 
     def __del__(deinit self):
         """Release both z_streams through the FFI; safe to call

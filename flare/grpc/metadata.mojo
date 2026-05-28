@@ -88,8 +88,8 @@ struct GrpcMetadata(Copyable, Defaultable, Movable):
     def __init__(out self):
         self._entries = List[GrpcMetadataEntry]()
 
-    def __copyinit__(out self, existing: Self):
-        self._entries = existing._entries.copy()
+    def __init__(out self, *, copy: Self):
+        self._entries = copy._entries.copy()
 
     def copy(self) -> Self:
         var out = Self()
