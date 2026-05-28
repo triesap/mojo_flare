@@ -29,8 +29,8 @@ from std.testing import assert_equal, assert_true, assert_false, TestSuite
 from flare import (
     Cancel as RootCancel,
     CancelHandler as RootCancelHandler,
-    WithCancel as RootWithCancel,
 )
+from flare.prelude import WithCancel as RootWithCancel
 from flare.http import (
     Cancel,
     CancelCell,

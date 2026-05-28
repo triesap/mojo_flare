@@ -20,7 +20,6 @@ from flare.http import (
     HttpServer,
     Handler,
     Router,
-    App,
     Request,
     Response,
     Method,
