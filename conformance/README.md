@@ -74,7 +74,7 @@ Each fixture is a JSON file with a flat top-level structure:
 - `expect` — `"accept"` or `"reject"`.
 - `expect_reason` — free-text rationale; consumed by the runner only on
   failure.
-- `leniency` — optional `H1LeniencyConfig` overrides that flip behaviour
+- `leniency` — optional `_ExperimentalH1LeniencyConfig` overrides that flip behaviour
   (e.g. `allow_lf_only_line_endings: true` flips the expectation from
   reject → accept).
 - `expected_*` — fields the parser must produce when `expect == "accept"`.

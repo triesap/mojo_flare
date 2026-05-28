@@ -60,9 +60,10 @@ embedding flare-as-parser can do the same.
 The H1 parser accepts a handful of widely-deployed RFC 9110 /
 RFC 9112 relaxations (LF-only line endings, OWS around ``:``,
 mixed-case method tokens) that are useful in practice but
-implicit in the call site today. The named ``H1LeniencyConfig``
-struct will surface them as opt-in flags in a follow-up commit;
-this re-export shim is the load-bearing first step.
+implicit in the call site today. The named
+``_ExperimentalH1LeniencyConfig`` struct surfaces them as
+opt-in flags; the underscore prefix signals that the
+parser-plumbing for individual flags is still landing.
 """
 
 # Cookies (RFC 6265) -- pure parsers / constructors / serialisers.
@@ -168,7 +169,11 @@ from flare.http2.state import (
     StreamState as H2StreamState,
 )
 
-# HTTP/1.1 parser leniency configuration carrier. Strict by
-# default; every relaxation is opt-in and named after the RFC
-# 9112 section it relaxes.
-from flare.http.proto.h1_leniency import H1LeniencyConfig
+# HTTP/1.1 parser leniency configuration carrier (experimental).
+# Strict by default; every relaxation is opt-in and named after
+# the RFC 9112 section it relaxes. The ``_Experimental`` prefix
+# signals that parser plumbing is incomplete -- only
+# ``allow_lf_only_line_endings`` and ``allow_obs_fold`` drive
+# parser branches today; the rest of the named flags are public
+# contract surface that the v0.9 audit pass will wire end-to-end.
+from flare.http.proto.h1_leniency import _ExperimentalH1LeniencyConfig

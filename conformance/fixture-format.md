@@ -14,7 +14,7 @@ Each fixture is a JSON file. Naming convention:
   "input_hex":      String,     // space-separated hex pairs
   "expect":         "accept" | "reject",
   "expect_reason":  String,     // why this outcome is correct
-  "leniency":       Object,     // optional H1LeniencyConfig fields
+  "leniency":       Object,     // optional _ExperimentalH1LeniencyConfig fields
   "expected_method": String,    // present when expect == "accept"
   "expected_uri":    String,
   "expected_version": String
@@ -25,7 +25,7 @@ Each fixture is a JSON file. Naming convention:
   ASCII space. Whitespace between pairs is collapsed during loading.
   Comments inside the hex string are not supported; the JSON `name`
   field is the place for human notes.
-- `leniency` is keyed by `H1LeniencyConfig` field name. Any omitted
+- `leniency` is keyed by `_ExperimentalH1LeniencyConfig` field name. Any omitted
   field uses the strict default (`False`). The conformance runner
   hands the resulting config to the parser before applying the input
   bytes.

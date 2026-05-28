@@ -1,4 +1,4 @@
-"""Named opt-in flags for HTTP/1.1 parser leniency.
+"""Named opt-in flags for HTTP/1.1 parser leniency (experimental).
 
 RFC 9112 (HTTP/1.1) defines a strict wire grammar. Real-world
 clients ship bugs around the edges of that grammar, and most
@@ -10,15 +10,27 @@ the configuration call site rather than buried in parser
 internals.
 
 The struct itself is a configuration carrier -- plumbing each
-flag into the request-line / header / chunked-body parsers is a
-follow-up step within the cycle. The load-bearing first step is
-giving the relaxations names and a documented default policy.
+flag into the request-line / header / chunked-body parsers is
+**not yet complete**. Today the carrier only drives the
+``allow_lf_only_line_endings`` and ``allow_obs_fold`` paths
+through the conformance corpus; the rest of the named flags
+parse but do not yet alter the parser's strict default. The
+load-bearing first step is giving the relaxations names and a
+documented default policy so deployments can audit what the
+spec relaxations *would* be when the audit pass lands.
+
+The **`_Experimental` prefix** on the public struct name
+communicates this honestly: code that depends on a specific
+relaxation taking effect must wait for the parser-plumbing
+follow-up. Strict mode is fully wired today, so deployments
+that trust only well-behaved peers can ship the strict default
+without surprises.
 
 ## Design
 
-- **Strict by default.** ``H1LeniencyConfig()`` returns the
-  strictest configuration: every flag off. A server that
-  trusts only well-behaved peers can ship this config and
+- **Strict by default.** ``_ExperimentalH1LeniencyConfig()``
+  returns the strictest configuration: every flag off. A server
+  that trusts only well-behaved peers can ship this config and
   reject anything that bends the spec.
 - **One flag, one relaxation.** No "loose" / "strict" master
   preset: each relaxation is justified individually.
@@ -34,32 +46,45 @@ would otherwise reject. See the field docstrings for the
 mapping.
 
 ```mojo
-from flare.http.proto import H1LeniencyConfig
+from flare.http.proto import _ExperimentalH1LeniencyConfig
 
 # Strict (default): reject every relaxation.
-var strict = H1LeniencyConfig()
+var strict = _ExperimentalH1LeniencyConfig()
 
 # Compatible with chatty legacy clients: accept the two most
-# common relaxations and nothing else.
-var compat = H1LeniencyConfig(
+# common relaxations and nothing else. Only
+# ``allow_lf_only_line_endings`` is wired into the parser
+# today; ``allow_mixed_case_method`` parses but does not yet
+# normalise mixed-case methods.
+var compat = _ExperimentalH1LeniencyConfig(
     allow_lf_only_line_endings=True,
     allow_mixed_case_method=True,
 )
 ```
 
-The full audit + parser plumbing is a follow-up; today this
-struct is the public API contract, and ``H1LeniencyConfig`` is
-re-exported from ``flare.http.proto`` so users can write
-configuration code against the named surface immediately.
+The full audit + parser plumbing is the v0.9 follow-up; today
+this struct is the public API contract, and
+``_ExperimentalH1LeniencyConfig`` is re-exported from
+``flare.http.proto`` so users can write configuration code
+against the named surface immediately.
 """
 
 
-struct H1LeniencyConfig(Copyable, Movable):
-    """HTTP/1.1 parser leniency configuration.
+struct _ExperimentalH1LeniencyConfig(Copyable, Movable):
+    """HTTP/1.1 parser leniency configuration (experimental).
 
     Strict by default. Each field maps to one RFC 9112
     relaxation; the docstring on each field cites the section
     it relaxes.
+
+    The underscore prefix is a deliberate signal that the
+    parser-plumbing for individual flags is incomplete: today
+    only ``allow_lf_only_line_endings`` and ``allow_obs_fold``
+    drive parser branches through the conformance corpus; the
+    rest of the fields are documented contract surface that
+    the v0.9 audit pass will wire end-to-end. Strict mode (the
+    default) is fully wired and remains the production-safe
+    pick.
     """
 
     var allow_lf_only_line_endings: Bool

@@ -266,7 +266,7 @@ check-sans-io   = "bash tools/check_sans_io.sh"
 # All test/example/microbench tasks work under the lean default env —
 # they only need the base `mojo` compiler + runtime deps.
 test-proto-reexports = "mojo -I . tests/http/test_proto_reexports.mojo"  # ``flare.http.proto`` sans-I/O namespace re-export regression (~10 cases)
-test-h1-leniency     = "mojo -I . tests/http/test_h1_leniency.mojo"      # ``H1LeniencyConfig`` named-flag carrier surface (~5 cases)
+test-h1-leniency     = "mojo -I . tests/http/test_h1_leniency.mojo"      # ``_ExperimentalH1LeniencyConfig`` named-flag carrier surface (~5 cases)
 test-conformance-h1  = "mojo -I . tests/conformance/test_conformance_h1.mojo"  # H1 wire-grammar fixtures under ``conformance/h1/`` (~10 cases)
 test-quic-varint     = "mojo -I . tests/quic/test_varint.mojo"           # RFC 9000 §16 variable-length integer codec (~12 cases)
 test-quic-packet     = "mojo -I . tests/quic/test_packet.mojo"           # RFC 9000 §17 long/short packet header codec (~11 cases)

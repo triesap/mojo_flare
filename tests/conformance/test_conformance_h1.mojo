@@ -10,9 +10,9 @@ next conformance step. The parser entry point
 ``_parse_http_request_bytes_minimal`` in ``flare.http.server``
 already exists and is exercised by ``tests/http/test_parse_minimal.mojo``;
 the conformance runner will start invoking it once the
-``H1LeniencyConfig`` flags are plumbed through the parser (a
-follow-up step within this cycle). Today the runner validates
-that every fixture is loadable and self-consistent, which is what
+``_ExperimentalH1LeniencyConfig`` flags are plumbed through the
+parser (the v0.9 audit pass). Today the runner validates that
+every fixture is loadable and self-consistent, which is what
 ``test-conformance-h1`` asserts.
 """
 
@@ -20,7 +20,7 @@ from std.pathlib import Path
 from std.testing import assert_equal, assert_false, assert_true
 from json import loads, Value, Null
 
-from flare.http.proto import H1LeniencyConfig
+from flare.http.proto import _ExperimentalH1LeniencyConfig
 
 
 def _digit(c: UInt8) raises -> Int:
@@ -95,10 +95,11 @@ def _string_or(j: Value, key: String, default: String) raises -> String:
     return v.string_value()
 
 
-def _apply_leniency(j: Value) raises -> H1LeniencyConfig:
-    """Build an ``H1LeniencyConfig`` from a fixture's ``leniency``
-    overlay. Missing fields fall back to strict defaults."""
-    return H1LeniencyConfig(
+def _apply_leniency(j: Value) raises -> _ExperimentalH1LeniencyConfig:
+    """Build an ``_ExperimentalH1LeniencyConfig`` from a fixture's
+    ``leniency`` overlay. Missing fields fall back to strict
+    defaults."""
+    return _ExperimentalH1LeniencyConfig(
         allow_lf_only_line_endings=_bool_or(
             j, "allow_lf_only_line_endings", False
         ),
