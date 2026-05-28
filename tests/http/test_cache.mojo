@@ -115,7 +115,7 @@ def test_in_memory_store_round_trip() raises:
     var body = List[UInt8]()
     body.append(UInt8(ord("h")))
     body.append(UInt8(ord("i")))
-    var entry = CacheEntry(
+    var entry = CacheEntry.basic(
         status=200,
         headers=List[Tuple[String, String]](),
         body=body^,
@@ -137,19 +137,19 @@ def test_in_memory_store_capacity_eviction() raises:
     var k1 = CacheKey(raw=String("k1"))
     var k2 = CacheKey(raw=String("k2"))
     var k3 = CacheKey(raw=String("k3"))
-    var e1 = CacheEntry(
+    var e1 = CacheEntry.basic(
         status=200,
         headers=List[Tuple[String, String]](),
         body=List[UInt8](),
         inserted_at_ms=Int64(0),
     )
-    var e2 = CacheEntry(
+    var e2 = CacheEntry.basic(
         status=200,
         headers=List[Tuple[String, String]](),
         body=List[UInt8](),
         inserted_at_ms=Int64(0),
     )
-    var e3 = CacheEntry(
+    var e3 = CacheEntry.basic(
         status=200,
         headers=List[Tuple[String, String]](),
         body=List[UInt8](),
@@ -168,7 +168,7 @@ def test_in_memory_store_capacity_eviction() raises:
 def test_in_memory_store_remove() raises:
     var store = InMemoryCacheStore()
     var key = CacheKey(raw=String("test"))
-    var entry = CacheEntry(
+    var entry = CacheEntry.basic(
         status=200,
         headers=List[Tuple[String, String]](),
         body=List[UInt8](),
