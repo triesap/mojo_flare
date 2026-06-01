@@ -25,6 +25,24 @@ State transitions::
     STATE_READING ─ handler returned ─> STATE_WRITING ─ flushed ─┬─> STATE_READING (keep-alive)
                                                                 └─> STATE_CLOSING (should_close)
     STATE_READING / STATE_WRITING ─ peer close / error / timeout ─> STATE_CLOSING
+
+# TODO(track-reactor-split): this file is allowlisted in
+# tools/check_reactor_size.sh because it currently exceeds the 600-
+# line cap the reactor sub-package wants to enforce. The natural
+# seams to extract next:
+#
+#   _reactor/keepalive_scan.mojo  -- ``Connection`` header
+#       predicates + ``_compact_read_buf_drop_prefix`` + case-
+#       insensitive byte matchers (independent of ``ConnHandle``).
+#   _reactor/h1_dispatch.mojo     -- the H1 read / parse / handler
+#       call path on ``ConnHandle.on_readable`` (bulk of the file).
+#   _reactor/write_path.mojo      -- the response serializer + the
+#       ``StepResult`` driver consumed by ``on_writable``.
+#
+# Each split is mechanical (pure code motion, no behaviour change)
+# and lands in its own atomic commit so the diff stays
+# review-friendly. After the splits land the allowlist entry comes
+# off and the lint enforces the 600-line cap with no escape hatch.
 """
 
 from std.collections import List, Optional

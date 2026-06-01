@@ -265,6 +265,11 @@ bench   = { features = ["dev", "bench"], solve-group = "default" }
 #                / flare.tls / flare.net). Cheap, runs in milliseconds, fits
 #                inside the per-commit gate.
 check-sans-io   = "bash tools/check_sans_io.sh"
+# check-reactor-size: enforces the 600-line cap on every file under
+#                flare/http/_reactor/. The cap guards the v0.8 reactor
+#                decomposition gain; offenders are either split or
+#                explicitly allowlisted with a documented split plan.
+check-reactor-size = "bash tools/check_reactor_size.sh"
 
 # ── Tests (flat files, one file per test suite) ───────────────────────────────
 # Each task runs a single test file; use 'pixi run tests' to run all.
