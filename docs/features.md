@@ -220,34 +220,49 @@ own dispatch loop.
 ## HTTP/3 + QUIC codec primitives
 
 Sans-I/O codec primitives for QUIC v1 (RFC 9000) and HTTP/3
-(RFC 9114). Codecs only — the QUIC reactor, the TLS-on-UDP
-FFI, and the congestion-controller drive land alongside the
-QUIC server in a later release. The codecs are byte-clean
-against fixtures from `aioquic` + `quiche` and covered by
-the dedicated `fuzz-quic-varint`, `fuzz-quic-long-header`,
-and `fuzz-h3-frame` harnesses listed in the
-[fuzz coverage table](#testing-and-fuzz-coverage).
+(RFC 9114). Codecs and pure state machines only — the QUIC
+reactor and the TLS-on-UDP FFI that drive the wire I/O land
+alongside the QUIC server in a follow-up release. The codecs
+are byte-clean and covered by `fuzz-quic-varint`,
+`fuzz-quic-long-header`, `fuzz-quic-frame-decode`,
+`fuzz-quic-transport-params`, `fuzz-h3-frame`, and
+`fuzz-qpack-decode` (200 K runs each, zero crashes); see the
+[fuzz coverage table](#testing-and-fuzz-coverage). The codec
+demo at [`quic_codec_demo.mojo`](../examples/advanced/quic_codec_demo.mojo)
+exercises varint, frame codec, transport parameters, state
+machine, and congestion controller round-trips end-to-end.
 
 | Surface | Where |
 |---|---|
 | QUIC variable-length integer codec (RFC 9000 §16): `QuicVarint`, `quic_encode_varint`, `quic_decode_varint`, `quic_varint_encoded_length`, `QUIC_VARINT_MAX` | `flare.quic.varint` |
 | QUIC long / short packet header codec (RFC 9000 §17): `QuicLongHeader`, `QuicShortHeader`, `QuicConnectionId`, `QuicInitialExtras`, `quic_encode_long_header`, `quic_encode_short_header`, `quic_parse_long_header`, `quic_parse_short_header`, `quic_parse_initial_extras` | `flare.quic.packet` |
 | QUIC packet-type constants: `QUIC_PACKET_TYPE_INITIAL` / `_ZERO_RTT` / `_HANDSHAKE` / `_RETRY`, `QUIC_VERSION_1`, `QUIC_VERSION_NEGOTIATION`, `QUIC_MAX_CID_LENGTH` | `flare.quic` |
+| QUIC transport-frame codec (RFC 9000 §19 — all 22 frame types: PADDING, PING, ACK / ACK_ECN, RESET_STREAM, STOP_SENDING, CRYPTO, NEW_TOKEN, STREAM, MAX_DATA, MAX_STREAM_DATA, MAX_STREAMS_BIDI / _UNI, DATA_BLOCKED, STREAM_DATA_BLOCKED, STREAMS_BLOCKED_BIDI / _UNI, NEW_CONNECTION_ID, RETIRE_CONNECTION_ID, PATH_CHALLENGE, PATH_RESPONSE, CONNECTION_CLOSE (transport + application), HANDSHAKE_DONE): `Frame` discriminated union, `ParsedFrame`, `encode_frame`, `parse_frame`, plus typed payload structs and `FRAME_TYPE_*` constants | `flare.quic.frame` |
+| QUIC transport parameters (RFC 9000 §18): `TransportParameters`, `encode_transport_parameters`, `decode_transport_parameters`, `empty_transport_parameters`; all `TP_ID_*` identifiers and defaults (`DEFAULT_MAX_UDP_PAYLOAD_SIZE`, `DEFAULT_ACK_DELAY_EXPONENT`, `DEFAULT_MAX_ACK_DELAY`, `DEFAULT_ACTIVE_CONNECTION_ID_LIMIT`) | `flare.quic.transport_params` |
+| QUIC connection + stream state machines (RFC 9000 §3, §10, §13): `Connection`, `Stream`, `ConnectionEvents`, `handle_frame`, `mark_handshake_complete`, `is_idle_timeout_expired`, `connection_close`, `new_connection`, `new_stream`, `empty_events`; `CONN_STATE_*` and `STREAM_STATE_*` enums | `flare.quic.state` |
+| QUIC congestion control (RFC 9438 CUBIC + RFC 9406 HyStart++ + RFC 9002 §7.7 pacing) as pure functions over a `CcState` value: `cc_init`, `on_packet_sent`, `on_ack_received`, `on_packets_lost`, `on_round_start`, `pacing_budget`, `pacing_rate_bytes_per_second`, `can_send` | `flare.quic.cc` |
 | HTTP/3 frame codec (RFC 9114 §7): `H3Frame`, `H3FrameType`, `encode_h3_frame`, `decode_h3_frame`; frame-type constants `H3_FRAME_TYPE_{DATA,HEADERS,CANCEL_PUSH,SETTINGS,PUSH_PROMISE,GOAWAY,MAX_PUSH_ID}` | `flare.h3.frame` |
 | HTTP/3 SETTINGS payload (RFC 9114 §7.2.4): `H3Setting`, `encode_h3_settings`, `decode_h3_settings`; standard identifiers `H3_SETTINGS_{QPACK_MAX_TABLE_CAPACITY,MAX_FIELD_SECTION_SIZE,QPACK_BLOCKED_STREAMS,ENABLE_CONNECT_PROTOCOL}` | `flare.h3.frame` |
+| HTTP/3 request-stream state machine (RFC 9114 §4 + §7): `H3RequestReader`, `H3RequestEvent`, `feed`; emits HEADERS / DATA / TRAILERS / UNKNOWN_FRAME / NEEDS_MORE / PROTOCOL_ERROR events with the `H3_REQUEST_EVENT_*` tags and tracks the INIT / BODY / TRAILERS / DONE phases via the `H3_REQUEST_STATE_*` tags | `flare.h3.request_reader` |
+| HTTP/3 response-stream writer (RFC 9114 §4 + §7): `encode_response_headers`, `encode_response_data`, `encode_response_trailers`; lowercases header names, rejects pseudo-headers in application + trailer sections, validates status in 100..599; QPACK-encodes field sections via `flare.qpack` | `flare.h3.response_writer` |
+| QPACK static-only encoder + decoder (RFC 9204 — static table per Appendix A, literal field lines with literal names, Huffman shared with HPACK; dynamic table deferred): `QpackHeader`, `encode_field_section`, `decode_field_section`, `static_table_lookup`, `static_table_find`, `static_table_find_name`, `QPACK_STATIC_TABLE_SIZE` | `flare.qpack` |
 
 ## gRPC
 
-Sans-I/O gRPC codec primitives — wire-level surface only
-(LPM framing, canonical Status codes, Metadata carrier).
-The HTTP/2 server adapter that translates these into an
-end-to-end gRPC server ships in a follow-up release.
+gRPC primitives on top of the HTTP/2 reactor. The bottom two
+wire layers (LPM framing, canonical Status codes, Metadata
+carrier) ship as sans-I/O codecs; the unary call shape ships
+as a server adapter that maps an HTTP/2 stream to a typed
+`GrpcUnary` handler. Server-streaming, client-streaming,
+bidirectional, the client side, and proto3 codegen are
+deferred to follow-up cycles.
 
 | Surface | Where |
 |---|---|
 | Length-prefixed message framing (gRPC wire format): `GrpcMessage`, `GrpcDecodeResult`, `GrpcCompressionFlag`, `encode_grpc_message`, `decode_grpc_message`, `GRPC_COMPRESSION_NONE`, `GRPC_COMPRESSION_COMPRESSED` | `flare.grpc.framing` |
 | Canonical status codes (`GrpcStatus`): `GRPC_STATUS_OK`, `_CANCELLED`, `_UNKNOWN`, `_INVALID_ARGUMENT`, `_DEADLINE_EXCEEDED`, `_NOT_FOUND`, `_ALREADY_EXISTS`, `_PERMISSION_DENIED`, `_RESOURCE_EXHAUSTED`, `_FAILED_PRECONDITION`, `_ABORTED`, `_OUT_OF_RANGE`, `_UNIMPLEMENTED`, `_INTERNAL`, `_UNAVAILABLE`, `_DATA_LOSS`, `_UNAUTHENTICATED` | `flare.grpc.status` |
 | Metadata carrier with binary / text key discipline (`-bin` suffix for binary keys, base64 transport): `GrpcMetadata`, `GrpcMetadataEntry` | `flare.grpc.metadata` |
+| Unary server adapter: `GrpcUnary` per-method handler trait, `GrpcCallContext` (request inputs + parsed `grpc-timeout`), `GrpcCallOutcome` (response bytes + final `GrpcStatus` + trailing `GrpcMetadata`), `parse_request_headers` (validates POST + `content-type: application/grpc[+proto]` + `te: trailers`), `stitch_request_data` (concatenates LPM frames from HTTP/2 DATA, rejects compressed-flag set), `encode_unary_response` (wraps reply in uncompressed LPM), `run_unary_call` (sans-I/O orchestration that threads the call through the handler) | `flare.grpc.server` |
 
 ## OpenAPI
 
@@ -459,5 +474,8 @@ Per-harness breakdown (input → fuzzer):
 | gRPC LPM message decoder | `fuzz-grpc-lpm-decoder` |
 | QUIC varint codec (canonical round-trip + non-shortest policy) | `fuzz-quic-varint` |
 | QUIC long header parser (consumed-bytes invariant) | `fuzz-quic-long-header` |
+| QUIC transport-frame codec (RFC 9000 §19 — safety + idempotence on arbitrary bytes) | `fuzz-quic-frame-decode` |
+| QUIC transport-parameter codec (RFC 9000 §18 — typed-value stability across encode / decode / re-encode) | `fuzz-quic-transport-params` |
 | HTTP/3 frame codec (multi-byte varint frame types) | `fuzz-h3-frame` |
+| QPACK static-only decoder + round-trip (RFC 9204 — header stability across encode / decode) | `fuzz-qpack-decode` |
 | Cache-Control header parser (idempotent re-parse) | `fuzz-cache-control-parser` |

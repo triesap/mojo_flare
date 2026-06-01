@@ -1,12 +1,14 @@
 # Architecture
 
 flare is a layered library. Higher layers depend on lower layers and peer
-modules at the same layer don't import each other — with two known
-cross-layer dependencies tracked as cleanup work in the source: the
-runtime scheduler module reaches into `flare.http` to construct workers,
-and `flare.http` re-imports `flare.http2` for the unified reactor
-dispatch (the cycle is broken by extracting wire types to
-`flare.http.wire` in a later iteration; see the `# TODO` headers in
+modules at the same layer don't import each other. The runtime scheduler
+is generic over a `Frontend` trait, so the runtime → http edge that used
+to exist is now an http → runtime edge (the HTTP worker bring-up lives
+in `flare.http.multicore` and plugs into `Scheduler[F]` via the trait).
+One known intra-package edge remains as cleanup work: `flare.http`
+re-imports `flare.http2` for the unified reactor dispatch (the cycle is
+broken by extracting wire types to `flare.http.wire` in a later
+iteration; see the `# TODO` headers in
 `flare/http/_server_reactor_impl.mojo` and
 `flare/http/_unified_reactor_impl.mojo`). No global state, no hidden
 runtime.
@@ -71,28 +73,53 @@ flare.http     HTTP/1.1 client + reactor server + Handler / Router
                with parsed freshness on CacheEntry.is_fresh.
                Router is Copyable (refcounted struct-handler list)
                and resolves the multi-worker overload directly.
-flare.grpc     Sans-I/O gRPC codec primitives: length-prefixed
-               message framing (LPM), canonical Status codes,
-               Metadata carrier (binary / text key discipline).
-               The HTTP/2 server adapter (request dispatch into
-               unary / server-streaming / client-streaming /
-               bidi shapes, grpc-go interop) ships in a follow-up
-               release on top of these wire primitives.
+flare.grpc     gRPC primitives on top of the HTTP/2 reactor.
+               Wire codecs (length-prefixed message framing,
+               canonical Status codes, Metadata carrier with
+               binary / text key discipline) plus the unary
+               server adapter: GrpcUnary handler trait, request-
+               header validator (`content-type: application/grpc`,
+               `te: trailers`, `grpc-timeout` parser), LPM
+               stitching from HTTP/2 DATA frames, and the
+               sans-I/O run_unary_call orchestrator that emits
+               response bytes + final GrpcStatus + trailing
+               GrpcMetadata. Server-streaming, client-streaming,
+               bidirectional, the client side, and proto3
+               codegen ship in follow-up cycles.
 flare.openapi  OpenAPI 3.1 spec model + deterministic JSON
                emitter (stable key order for diffable specs).
                Auto-derivation from ComptimeRouter +
                serve_openapi + Swagger UI mount ship later.
-flare.quic     Sans-I/O QUIC v1 codec primitives -- variable-
-               length integer codec (RFC 9000 §16), long /
-               short packet header codec (RFC 9000 §17), no
-               reactor / TLS FFI / congestion control (those
-               land alongside the QUIC server in a later
-               release).
-flare.h3       Sans-I/O HTTP/3 frame codec + SETTINGS payload
-               (RFC 9114 §7).  Codec only; full server lives
-               with the QUIC reactor in a later release.
-               QPACK encoder + decoder land alongside the
-               server.
+flare.quic     Sans-I/O QUIC v1 codec primitives + pure state
+               machines: variable-length integer codec
+               (RFC 9000 §16); long / short packet header codec
+               (RFC 9000 §17); all 22 RFC 9000 §19 transport
+               frames (discriminated `Frame` union with
+               encode_frame / parse_frame); transport-parameter
+               codec (RFC 9000 §18); connection + stream state
+               machines (RFC 9000 §3, §10, §13); CUBIC +
+               HyStart++ congestion controller + RFC 9002 §7.7
+               pacing budget as pure functions over a `CcState`
+               value. No socket I/O, no TLS handshake -- the
+               reactor + TLS-on-UDP FFI that drive the wire
+               land alongside the QUIC server in a follow-up
+               release.
+flare.h3       Sans-I/O HTTP/3 codec primitives: frame codec +
+               SETTINGS payload (RFC 9114 §7), request-stream
+               state machine that emits typed events (HEADERS,
+               DATA, TRAILERS, UNKNOWN_FRAME, NEEDS_MORE,
+               PROTOCOL_ERROR) per RFC 9114 §4, and a response-
+               stream writer that emits HEADERS / DATA /
+               TRAILERS frames with QPACK-encoded field
+               sections, ASCII header-name lowercasing, and
+               pseudo-header validation. Server reactor lives
+               with the QUIC reactor in a follow-up release.
+flare.qpack    Sans-I/O static-only QPACK encoder + decoder
+               (RFC 9204). Static table per Appendix A (99
+               entries), literal field lines with literal
+               names, Huffman shared with the HPACK
+               implementation in `flare.http.proto.huffman`.
+               Dynamic table deferred to a follow-up cycle.
 flare.crypto   HMAC-SHA256, base64url codec
 flare.tls      TLS 1.2/1.3 (OpenSSL); TlsAcceptor + ALPN +
                session resumption (RFC 5077 tickets / RFC 8446
