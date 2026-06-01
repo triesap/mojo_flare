@@ -42,29 +42,10 @@ References:
 from std.collections import List
 from std.memory import Span
 
+from flare.http.proto.ascii import ascii_lower
 from flare.qpack import QpackHeader, encode_field_section
 
 from .frame import H3_FRAME_TYPE_DATA, H3_FRAME_TYPE_HEADERS, encode_h3_frame
-
-
-def _lowercase_ascii(s: String) -> String:
-    """Return a lowercased copy of an ASCII header name.
-
-    HTTP/3 mandates lowercase field names on the wire (RFC 9114
-    §4.2); we sanitise here so callers don't have to remember.
-    Bytes outside the ASCII range pass through unchanged -- the
-    QPACK encoder accepts them and the QUIC peer surfaces a
-    ``H3_MESSAGE_ERROR`` if they violate lowercasing.
-    """
-    var bytes = s.as_bytes()
-    var out = String(capacity=len(bytes) + 1)
-    for i in range(len(bytes)):
-        var b = bytes[i]
-        if b >= UInt8(ord("A")) and b <= UInt8(ord("Z")):
-            out += chr(Int(b) + 32)
-        else:
-            out += chr(Int(b))
-    return out^
 
 
 def encode_response_headers(
@@ -85,7 +66,7 @@ def encode_response_headers(
     var emit = List[QpackHeader]()
     emit.append(QpackHeader(":status", String(status)))
     for i in range(len(headers)):
-        var name = _lowercase_ascii(headers[i].name)
+        var name = ascii_lower(headers[i].name)
         if name == ":status" or (
             len(name.as_bytes()) > 0 and name.as_bytes()[0] == UInt8(ord(":"))
         ):
@@ -123,7 +104,7 @@ def encode_response_trailers(
     """
     var emit = List[QpackHeader]()
     for i in range(len(trailers)):
-        var name = _lowercase_ascii(trailers[i].name)
+        var name = ascii_lower(trailers[i].name)
         if len(name.as_bytes()) > 0 and name.as_bytes()[0] == UInt8(ord(":")):
             raise Error(
                 "h3 writer: pseudo-header '"

@@ -39,6 +39,9 @@ Public API
   construct a ``String`` of the same byte length from ``span`` via
   ``String(unsafe_uninit_length=n)`` + ``memcpy``. Empty input
   returns ``String("")``.
+* :func:`ascii_lower(s: String) -> String` -- return an ASCII-
+  lowercase copy of ``s`` using a single ``unsafe_uninit_length``
+  allocation. The pure-ASCII fast path skips the per-byte branch.
 """
 
 from std.memory import memcpy
@@ -76,3 +79,49 @@ def ascii_unchecked_string(span: Span[UInt8, _]) -> String:
     var s = String(unsafe_uninit_length=n)
     memcpy(dest=s.unsafe_ptr_mut(), src=span.unsafe_ptr(), count=n)
     return s^
+
+
+@always_inline
+def ascii_lower(s: String) -> String:
+    """Return an ASCII-lowercase copy of ``s``.
+
+    Allocates a single ``unsafe_uninit_length`` ``String`` of the
+    input's byte length and fills it via a tight pointer loop. A
+    fast path scans ``s`` for any upper-case ASCII byte first and
+    delegates to :func:`ascii_unchecked_string` when none is present
+    -- the keep-alive request path's per-``Connection:`` lookup
+    pays roughly the cost of one length probe in the common
+    already-lowercase case.
+
+    Caller contract: ``s`` MUST already be valid ASCII. The output
+    is non-meaningful for bytes ``>= 0x80`` (those pass through
+    unchanged).
+
+    Args:
+        s: Source ASCII string.
+
+    Returns:
+        A freshly-allocated ``String`` of length ``s.byte_length()``
+        with each upper-case ASCII byte lowered.
+    """
+    var n = s.byte_length()
+    if n == 0:
+        return String("")
+    var src = s.unsafe_ptr()
+    var has_upper = False
+    for i in range(n):
+        var c = src[i]
+        if c >= 65 and c <= 90:
+            has_upper = True
+            break
+    if not has_upper:
+        return ascii_unchecked_string(s.as_bytes())
+    var out = String(unsafe_uninit_length=n)
+    var dst = out.unsafe_ptr_mut()
+    for i in range(n):
+        var c = src[i]
+        if c >= 65 and c <= 90:
+            dst[i] = c + 32
+        else:
+            dst[i] = c
+    return out^

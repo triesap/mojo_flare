@@ -50,6 +50,7 @@ References:
 from std.collections import List
 from std.memory import Span
 
+from flare.http.proto.ascii import ascii_unchecked_string
 from flare.http2.hpack import (
     HpackHeader as QpackHeader,
     decode_integer,
@@ -198,9 +199,12 @@ def _decode_string_literal(
         huffman_decode(Span[UInt8, _](raw), bytes)
     else:
         bytes = raw^
-    var s = String(capacity=len(bytes) + 1)
-    for i in range(len(bytes)):
-        s += chr(Int(bytes[i]))
+    # QPACK string literals carry token-shaped ASCII per RFC 9204 §4
+    # (after any Huffman decode); the per-char ``s += chr(...)`` loop
+    # used here previously allocated per byte. The shared
+    # ``ascii_unchecked_string`` helper builds a ``String`` of the
+    # exact length with one ``memcpy`` and no UTF-8 validation pass.
+    var s = ascii_unchecked_string(Span[UInt8, _](bytes))
     return Tuple[String, Int](s^, ip.offset + n)
 
 

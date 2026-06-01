@@ -2086,38 +2086,12 @@ def _ascii_strip_slice(span: Span[UInt8, _]) -> String:
     return _ascii_unchecked_string(span[start:stop])
 
 
-@always_inline
-def _ascii_lower(s: String) -> String:
-    """Return ASCII-lowercase copy of ``s``.
-
-    Bulk writes bytes through a pre-sized ``List[UInt8]`` and converts
-    once at the end; the naive ``out += chr(...)`` loop used to allocate
-    per byte which dominated cost on keep-alive request paths that call
-    this on every ``Connection:`` header.
-    """
-    var n = s.byte_length()
-    if n == 0:
-        return String("")
-    # Fast path: if the input has no upper-case ASCII bytes, return a
-    # copy directly without the branch inside the loop.
-    var src = s.unsafe_ptr()
-    var has_upper = False
-    for i in range(n):
-        var c = src[i]
-        if c >= 65 and c <= 90:
-            has_upper = True
-            break
-    if not has_upper:
-        return _ascii_unchecked_string(s.as_bytes())
-    var out = String(unsafe_uninit_length=n)
-    var dst = out.unsafe_ptr_mut()
-    for i in range(n):
-        var c = src[i]
-        if c >= 65 and c <= 90:
-            dst[i] = c + 32
-        else:
-            dst[i] = c
-    return out^
+# ``_ascii_lower`` lives in ``flare.http.proto.ascii`` (canonical
+# sans-I/O helper); re-export from here under the original private
+# name so every existing call site -- and every ``from flare.http.server
+# import _ascii_lower`` import across the reactor, the gRPC adapter,
+# and the tests -- keeps working without an audit pass.
+from flare.http.proto.ascii import ascii_lower as _ascii_lower
 
 
 def _status_reason(code: Int) -> String:

@@ -48,6 +48,7 @@ SANS_IO_FILES=(
     "flare/http2/hpack.mojo"
     "flare/http2/state.mojo"
     "flare/http/proto/h2c_upgrade.mojo"
+    "flare/http/proto/ascii.mojo"
     "flare/quic/varint.mojo"
     "flare/quic/packet.mojo"
     "flare/quic/frame.mojo"
