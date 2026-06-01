@@ -35,6 +35,9 @@ from flare.crypto.hmac import base64url_decode
 from flare.http.cancel import CancelCell, CancelReason
 from flare.http.handler import Handler, CancelHandler, ViewHandler
 from flare.http.headers import HeaderMap
+from flare.http.proto.h2c_upgrade import (
+    detect_h2c_upgrade as _proto_detect_h2c_upgrade,
+)
 from flare.http.request import Request
 from flare.http.response import Response
 from flare.http.server import (
@@ -67,30 +70,22 @@ comptime STATE_CLOSING: Int = 2
 """Connection is shutting down; next event should finalize close."""
 
 
-# ── h2c upgrade detection (pending neutral-helper promotion) ──────────────────
+# ── h2c upgrade detection ─────────────────────────────────────────────
 
 
 @always_inline
 def _detect_h2c_upgrade_inline(headers: HeaderMap) -> Bool:
-    """Inline copy of :func:`flare.http2.server.detect_h2c_upgrade`.
+    """Thin wrapper around :func:`flare.http.proto.h2c_upgrade.detect_h2c_upgrade`.
 
-    Replicated locally to avoid a ``flare.http._reactor.conn_handle``
-    -> ``flare.http2.server`` -> ``flare.http`` circular import. The
-    canonical helper in :mod:`flare.http2.server` stays the public-
-    surface name; this private inline mirrors its logic byte-for-byte
-    (RFC 7540 §3.2: ``Upgrade: h2c`` + non-empty ``HTTP2-Settings``).
-
-    A subsequent decomposition commit promotes the canonical helper
-    into a neutral ``flare.http.proto.h2c_upgrade`` shared module
-    that both ``flare.http`` and ``flare.http2`` import from. This
-    inline helper goes away at that point.
+    The neutral sans-I/O detector lives in
+    :mod:`flare.http.proto.h2c_upgrade`; the canonical helper in
+    :mod:`flare.http2.server` also delegates there. This wrapper
+    keeps the local call site short (the `_inline` name signals
+    "predicate over a parsed HeaderMap" at the per-conn dispatch
+    point) and avoids pulling :mod:`flare.http2.server` into the
+    reactor's import graph.
     """
-    var upg = headers.get("upgrade")
-    if upg.byte_length() == 0:
-        return False
-    if upg != "h2c":
-        return False
-    return headers.get("http2-settings").byte_length() > 0
+    return _proto_detect_h2c_upgrade(headers)
 
 
 # ── Step result ───────────────────────────────────────────────────────────────

@@ -46,6 +46,7 @@ SANS_IO_FILES=(
     "flare/http2/frame.mojo"
     "flare/http2/hpack.mojo"
     "flare/http2/state.mojo"
+    "flare/http/proto/h2c_upgrade.mojo"
 )
 
 # Forbidden import patterns. Each matches both ``from flare.<X>`` /

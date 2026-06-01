@@ -216,21 +216,20 @@ def is_h2_alpn(alpn: String) -> Bool:
 
 
 def detect_h2c_upgrade(headers: HeaderMap) -> Bool:
-    """RFC 9113 §3.2 — detect inbound ``Upgrade: h2c`` request.
+    """RFC 7540 §3.2 — detect inbound ``Upgrade: h2c`` request.
 
-    The full RFC requires ``HTTP2-Settings: <base64>``
-    too; we accept the upgrade as long as both ``Upgrade: h2c``
-    and ``HTTP2-Settings`` are present. The decoded ``HTTP2-Settings``
-    payload is fed into the connection during initialisation by the
-    caller via :meth:`H2Connection.feed_settings_payload`.
+    Delegates to :func:`flare.http.proto.h2c_upgrade.detect_h2c_upgrade`,
+    the canonical sans-I/O implementation. The decoded
+    ``HTTP2-Settings`` payload is fed into the connection during
+    initialisation by the caller via
+    :meth:`H2Connection.feed_settings_payload` — that step is the
+    reactor-bound side of the upgrade and does not happen here.
     """
-    var upg = headers.get("upgrade")
-    if upg.byte_length() == 0:
-        return False
-    if upg != "h2c":
-        return False
-    var s = headers.get("http2-settings")
-    return s.byte_length() > 0
+    from flare.http.proto.h2c_upgrade import (
+        detect_h2c_upgrade as _proto_detect_h2c_upgrade,
+    )
+
+    return _proto_detect_h2c_upgrade(headers)
 
 
 # ── H2Connection driver ─────────────────────────────────────────────────
