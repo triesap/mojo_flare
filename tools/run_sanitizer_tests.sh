@@ -112,6 +112,13 @@ ASAN_TESTS=(
   # raise paths the reactor depends on for the configuration-
   # error vs handshake-failure distinction.
   "tests/tls/test_rustls_quic.mojo"
+  # Track Q2-W commit 4/4 handshake fixtures: live-fire FFI
+  # against a real Ed25519 self-signed cert. Drives the full
+  # acceptor_new -> accept -> feed_crypto -> take_crypto loop
+  # so ASan can catch any leaks across the C ABI boundary
+  # (Rust-side Box<Acceptor> / Box<Session> lifetime managed
+  # by flare_rustls_quic_acceptor_free / _session_free).
+  "tests/tls/test_rustls_quic_handshake.mojo"
 )
 TSAN_TESTS=(
   # Multicore + reactor (the only places we spawn pthreads)

@@ -477,3 +477,99 @@ fn level_for(sess: &Session) -> usize {
         3
     }
 }
+
+// ── In-crate unit tests (cargo test + cargo miri test) ──────────────
+//
+// These tests exercise the C ABI surface from inside Rust so
+// `cargo +nightly miri test` can interpret them under the strict
+// undefined-behavior detector.  Miri cannot drive rustls's `ring`
+// crypto path (assembly + FFI), so the tests are scoped to:
+//
+// - acceptor_new with invalid PEM (pure-Rust pemfile parsing)
+// - acceptor_free with NULL (no-op safety)
+// - last_error round-trip across set / get
+// - acceptor_free of a real Box-leaked acceptor (so the Drop
+//   chain runs under miri)
+//
+// The full handshake-driving tests live on the Mojo side under
+// `tests/tls/test_rustls_quic_handshake.mojo` (ASan-clean).
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CStr;
+
+    #[test]
+    fn acceptor_new_rejects_empty_pem() {
+        let p = flare_rustls_quic_acceptor_new(
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+        );
+        assert!(p.is_null(), "NULL cert should be rejected");
+        let err = unsafe { CStr::from_ptr(flare_rustls_quic_last_error()) };
+        assert!(
+            err.to_string_lossy().contains("NULL cert"),
+            "expected NULL-cert error, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn acceptor_new_rejects_garbage_pem() {
+        let garbage = b"not actually pem";
+        let p = flare_rustls_quic_acceptor_new(
+            garbage.as_ptr(),
+            garbage.len(),
+            garbage.as_ptr(),
+            garbage.len(),
+            std::ptr::null(),
+            0,
+        );
+        assert!(p.is_null(), "garbage PEM should be rejected");
+        let err = unsafe { CStr::from_ptr(flare_rustls_quic_last_error()) };
+        let msg = err.to_string_lossy();
+        assert!(
+            msg.contains("CERTIFICATE") || msg.contains("PEM"),
+            "expected PEM-parse error, got {:?}",
+            msg
+        );
+    }
+
+    #[test]
+    fn acceptor_free_null_is_noop() {
+        flare_rustls_quic_acceptor_free(std::ptr::null_mut());
+    }
+
+    #[test]
+    fn session_free_null_is_noop() {
+        flare_rustls_quic_session_free(std::ptr::null_mut());
+    }
+
+    #[test]
+    fn abi_version_returns_one() {
+        assert_eq!(flare_rustls_quic_abi_version(), 1);
+    }
+
+    #[test]
+    fn last_error_default_is_empty() {
+        // Force a fresh thread-local so prior tests don't seed it.
+        std::thread::spawn(|| {
+            let p = flare_rustls_quic_last_error();
+            let c = unsafe { CStr::from_ptr(p) };
+            assert_eq!(c.to_bytes(), b"");
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn set_last_error_round_trip() {
+        set_last_error("test message");
+        let p = flare_rustls_quic_last_error();
+        let c = unsafe { CStr::from_ptr(p) };
+        assert_eq!(c.to_bytes(), b"test message");
+    }
+}
