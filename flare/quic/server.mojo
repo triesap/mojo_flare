@@ -1,59 +1,74 @@
-"""``flare.quic.server`` -- QUIC server reactor surface (Track Q3 scaffold).
+"""``flare.quic.server`` -- QUIC server reactor (Track Q3-W).
 
 Wraps the sans-I/O QUIC connection state machine
 (:class:`flare.quic.state.Connection`) in a UDP listener +
-per-connection dispatcher. The full reactor wiring (epoll
-integration, ``sendmmsg`` + ``UDP_GRO`` + ECN, per-connection
-PTO timers driven through :mod:`flare.runtime.timer_wheel`) lands
-in a focused follow-up commit; this module ships the typed
-boundary the H3 server (Track Q4) and ALPN dispatcher (Track Q5)
-will build against.
+per-connection dispatcher. Commit 1/5 of Track Q3-W lands the
+UDP bind + the per-datagram dispatch loop; subsequent commits in
+the same track wire the per-packet decrypt path (2/5), the
+PTO / idle / ack-delay timer entries (3/5), the CC reactor
+hooks (4/5), and the loopback integration tests against a real
+QUIC client (5/5).
 
 ## What ships here
 
 - :class:`QuicServerConfig` -- bind configuration: host, port,
   rustls config carrier, congestion-controller choice, idle
   timeout, max packet size.
-- :class:`QuicListener` -- factory that owns the UDP socket
-  plus the per-connection dispatch table. Today it constructs
-  cleanly but :meth:`QuicListener.run` raises pending the
-  reactor wiring commit.
+- :class:`QuicListener` -- factory that owns a bound UDP
+  socket plus the per-connection dispatch table. The :meth:`bind`
+  factory opens the socket, :meth:`tick` drains one datagram
+  (unit-testable), :meth:`run` is the blocking event loop, and
+  :meth:`shutdown` requests a clean exit.
 - :class:`QuicConnection` -- per-connection driver that
   composes the existing :class:`flare.quic.state.Connection`
   state machine with a :trait:`flare.quic.cc.CongestionController`
   carrier and the rustls QUIC session.
-- :class:`QuicConnectionId` re-export from
-  :mod:`flare.quic.packet` plus the small connection-id table
-  carrier the reactor uses to route inbound datagrams to the
-  right connection.
+- :class:`ConnectionIdTable` -- per-listener routing table from
+  Connection ID to connection slot, used by the dispatch loop
+  to route inbound datagrams via the Destination Connection ID
+  in the packet header (RFC 9000 §5.1).
 
-## What's deferred to follow-ups
+## What's deferred to follow-ups inside this track
 
-- The actual UDP read loop + per-packet dispatch (needs the
-  rustls binding from Track Q2 + the OpenSSL AEAD backend from
-  Track Q1).
-- ``sendmmsg`` + ``UDP_GRO`` + ECN tuning -- v0.5 direct-
-  syscall FFI primitives exist but the QUIC fast path that
-  exercises them ships once the handshake works.
-- ``UDP_SEGMENT`` + GSO support -- separate commit, depends on
-  kernel feature detection.
+- The per-packet decrypt + state-machine dispatch
+  (:meth:`QuicConnection.handle_packet`) -- commit 2/5.
+- The PTO / idle / ack-delay TimerWheel entries -- commit 3/5.
+- The CC reactor hooks (``update_on_ack`` /
+  ``update_on_loss`` / ``pacing_budget``) -- commit 4/5.
+- ``recvmmsg`` + ``UDP_GRO`` batching on the ingress path and
+  ``sendmmsg`` + ``UDP_SEGMENT`` on the egress path -- not in
+  scope for v0.8; the single-datagram ``recv_from`` loop is the
+  functional contract this cycle ships.
 
 References:
 - RFC 9000 §5 "Connections" -- Connection ID routing.
 - RFC 9000 §10 "Connection Termination" -- idle / draining.
-- RFC 9002 §6.2 "PTO and probe packets" -- PTO timer wiring.
+- RFC 9000 §17 "Packet Formats" -- long / short header parse
+  for the dispatch path.
+- RFC 9002 §6.2 "PTO and probe packets" -- PTO timer wiring
+  (deferred to commit 3/5 of this track).
 """
 
 from std.collections import Dict, List, Optional
+from std.memory import Span
 
-from flare.quic.cc import CcChoice
-from flare.quic.crypto import QuicAead
-from flare.quic.packet import ConnectionId
-from flare.quic.state import Connection, new_connection
-from flare.tls.rustls_quic import RustlsQuicConfig
+from ..net.address import IpAddr, SocketAddr
+from ..udp import UdpSocket
+from .cc import CcChoice
+from .crypto import QuicAead
+from .packet import (
+    ConnectionId,
+    LongHeader,
+    MAX_CID_LENGTH,
+    PACKET_TYPE_INITIAL,
+    parse_long_header,
+    parse_short_header,
+)
+from .state import Connection, new_connection
+from ..tls.rustls_quic import RustlsQuicConfig
 
 
-# ── Configuration carrier ──────────────────────────────────────────────
+# -- Configuration carrier ----------------------------------------------
 
 
 struct QuicServerConfig(Copyable, Defaultable, Movable):
@@ -70,8 +85,8 @@ struct QuicServerConfig(Copyable, Defaultable, Movable):
 
     var port: UInt16
     """UDP port. Default 0 means "let the kernel pick" -- caller
-    must read the resolved port back via :meth:`QuicListener.bound_port`
-    after construction (deferred to the reactor follow-up)."""
+    reads the resolved port back via
+    :meth:`QuicListener.local_addr` after :meth:`QuicListener.bind`."""
 
     var rustls_config: RustlsQuicConfig
     """The rustls QUIC server configuration carrier. Provides the
@@ -112,6 +127,12 @@ struct QuicServerConfig(Copyable, Defaultable, Movable):
     """RFC 9000 §4.6 client-initiated uni streams limit. Default:
     3 -- H3 needs control + qpack-encoder + qpack-decoder."""
 
+    var local_cid_length: Int
+    """Length in bytes of the Connection IDs this server issues
+    to peers. RFC 9000 §5.1 caps at 20; 8 is the aioquic /
+    quinn / quiche default and is what the dispatch loop assumes
+    when parsing short-header packets after the handshake."""
+
     def __init__(out self):
         self.host = String("0.0.0.0")
         self.port = UInt16(0)
@@ -123,9 +144,10 @@ struct QuicServerConfig(Copyable, Defaultable, Movable):
         self.initial_max_data = UInt64(1 << 20)  # 1 MiB
         self.initial_max_streams_bidi = UInt64(100)
         self.initial_max_streams_uni = UInt64(3)
+        self.local_cid_length = 8
 
 
-# ── Per-connection driver ──────────────────────────────────────────────
+# -- Per-connection driver ----------------------------------------------
 
 
 struct QuicConnection(Copyable, Movable):
@@ -139,24 +161,23 @@ struct QuicConnection(Copyable, Movable):
     - A :trait:`flare.quic.cc.CongestionController` carrier
       (CUBIC in production, Reno in deterministic tests).
     - A :class:`flare.tls.rustls_quic.RustlsQuicSession`
-      carrying the per-encryption-level keys + handshake state.
+      carrying the per-encryption-level keys + handshake state
+      (wired in commit 2/5 of Track Q3-W).
 
     The reactor's per-packet hot path runs:
 
     1. Parse the long/short header out of the datagram
-       (``flare.quic.packet``).
-    2. Decrypt the protected payload via the rustls binding.
+       (``flare.quic.packet``) -- done in
+       :meth:`QuicListener.dispatch_datagram`.
+    2. Decrypt the protected payload via OpenSSL AEAD or rustls
+       (commit 2/5 of Track Q3-W).
     3. Dispatch each frame in the decrypted payload through
        :func:`flare.quic.state.handle_frame_buf`, which advances
        the per-stream + per-connection state machines.
-    4. Drive the CC controller with any newly-ACKed bytes.
+    4. Drive the CC controller with any newly-ACKed bytes
+       (commit 4/5 of Track Q3-W).
     5. Build any reply packets the state machine queued and
        feed them to the rustls session for encryption.
-
-    The current commit ships the carrier shape + the typed
-    surface for steps 1, 3, 4. Steps 2 and 5 require the rustls
-    Rust crate (Track Q2 follow-up) and the OpenSSL AEAD wiring
-    (Track Q1 follow-up).
     """
 
     var conn: Connection
@@ -198,7 +219,7 @@ struct QuicConnection(Copyable, Movable):
         self.alive = True
 
 
-# ── Connection ID table ────────────────────────────────────────────────
+# -- Connection ID table ------------------------------------------------
 
 
 struct ConnectionIdTable(Copyable, Defaultable, Movable, Sized):
@@ -213,9 +234,7 @@ struct ConnectionIdTable(Copyable, Defaultable, Movable, Sized):
 
     The carrier uses :class:`Dict[String, Int]` where the key is
     the lowercase-hex CID and the value is the slot index into
-    the listener's connection slab. Tests pin the carrier shape;
-    the full slab + concurrent-safe wiring lives in the reactor
-    follow-up commit.
+    the listener's connection slab.
     """
 
     var cid_to_slot: Dict[String, Int]
@@ -253,46 +272,245 @@ struct ConnectionIdTable(Copyable, Defaultable, Movable, Sized):
         return len(self.cid_to_slot)
 
 
-# ── Listener ───────────────────────────────────────────────────────────
+# -- CID hex helper (used by the dispatch table key) -------------------
+
+
+@always_inline
+def _hex_nibble(n: Int) -> UInt8:
+    """Return the lowercase ASCII byte for a single hex nibble."""
+    if n < 10:
+        return UInt8(48 + n)  # '0'..'9'
+    return UInt8(87 + n)  # 'a'..'f'
+
+
+def cid_to_hex(cid: ConnectionId) -> String:
+    """Encode a CID's bytes as lowercase hex. Used by the
+    dispatch table key so :class:`ConnectionIdTable` can hash
+    on a plain :class:`String`. An empty CID returns the empty
+    string -- the routing layer rejects that case explicitly.
+    """
+    var out = List[UInt8]()
+    for i in range(len(cid.bytes)):
+        var b = Int(cid.bytes[i])
+        out.append(_hex_nibble((b >> 4) & 0xF))
+        out.append(_hex_nibble(b & 0xF))
+    out.append(UInt8(0))  # null terminator for String constructor
+    return String(unsafe_from_utf8=Span[UInt8, _](out[: len(out) - 1]))
+
+
+# -- Listener -----------------------------------------------------------
 
 
 struct QuicListener(Movable):
     """UDP listener + per-connection dispatcher.
 
-    Long-lived. One instance per QUIC server bind. The reactor
-    drives the listener via :meth:`run` (deferred to the
-    follow-up commit).
+    Long-lived. One instance per QUIC server bind. Construct via
+    :meth:`bind`; the constructor opens the UDP socket and binds
+    it. The reactor drives the listener via :meth:`run` (blocks
+    until :meth:`shutdown`) or :meth:`tick` (single iteration --
+    used by tests + by callers that want to multiplex the event
+    loop with other work).
     """
 
     var config: QuicServerConfig
     var cid_table: ConnectionIdTable
-    var _bound: Bool
+    var connections: List[QuicConnection]
+    """Connection slab. Per-connection state lives here; the
+    :class:`ConnectionIdTable` maps each Connection ID to the
+    slot index. Slots are append-only in this commit; the
+    sweeper for closed connections lands with the timer-wheel
+    commit (3/5) of this track."""
+    var _socket: UdpSocket
+    var _local_addr: SocketAddr
+    var _stopping: Bool
+    """Set by :meth:`shutdown`. Read by :meth:`run` at the top of
+    every loop iteration so the event loop exits cleanly after
+    the next ``recv_from`` returns or times out."""
 
-    def __init__(out self, config: QuicServerConfig):
+    def __init__(
+        out self,
+        config: QuicServerConfig,
+        var sock: UdpSocket,
+        addr: SocketAddr,
+    ):
+        """Wrap an already-bound :class:`UdpSocket`. Internal --
+        callers use :meth:`bind`."""
         self.config = config.copy()
         self.cid_table = ConnectionIdTable()
-        self._bound = False
+        self.connections = List[QuicConnection]()
+        self._socket = sock^
+        self._local_addr = addr
+        self._stopping = False
+
+    @staticmethod
+    def bind(config: QuicServerConfig) raises -> QuicListener:
+        """Open the UDP socket and bind it to ``config.host`` /
+        ``config.port``. Returns a ready-to-run listener.
+
+        If ``config.port == 0`` the kernel picks an ephemeral
+        port; read it back via :meth:`local_addr`.
+        """
+        var ip = IpAddr.parse(config.host)
+        var addr = SocketAddr(ip, config.port)
+        var sock = UdpSocket.bind(addr)
+        var actual = sock.local_addr()
+        return QuicListener(config, sock^, actual)
+
+    def local_addr(self) -> SocketAddr:
+        """Return the address the UDP socket is actually bound to.
+        After :meth:`bind` with ``config.port == 0`` this reports
+        the kernel-chosen ephemeral port."""
+        return self._local_addr
 
     def bound(self) -> Bool:
-        """Whether the listener has bound the UDP socket. False
-        in the scaffold (the UDP bind path lands with the
-        reactor follow-up)."""
-        return self._bound
+        """Whether the UDP socket is bound. True for every
+        listener returned by :meth:`bind`."""
+        return True
 
-    def run(self) raises:
-        """Run the listener's event loop. Blocks the calling
-        thread; the reactor handles the per-datagram dispatch
-        internally.
+    def connection_count(self) -> Int:
+        """Number of connection slots currently allocated. Slots
+        are append-only in this commit; the sweep for closed
+        connections lands with the timer-wheel commit (3/5)."""
+        return len(self.connections)
 
-        Today raises because the rustls binding + the AEAD
-        backend are scaffolds. The follow-up commit implements
-        the UDP socket bind + epoll registration + per-datagram
-        decrypt + state-machine dispatch.
+    def dispatch_datagram(
+        mut self, datagram: Span[UInt8, _], peer: SocketAddr
+    ) raises -> Int:
+        """Route a single UDP datagram to the right connection slot.
+
+        Parses the first byte to pick long vs short header,
+        extracts the Destination Connection ID, looks it up in
+        :attr:`cid_table`, and either:
+
+        * Returns the existing slot for a known CID. Commit 2/5
+          of this track threads the per-packet decrypt + state
+          machine through here; today the dispatch just routes.
+        * Allocates a new slot for an Initial packet with an
+          unknown DCID (the QUIC accept path -- RFC 9000 §7).
+        * Returns ``-1`` to drop short-header packets with
+          unknown DCIDs (the stateless-reset path lands in a
+          later cycle; for now those datagrams are silently
+          discarded).
         """
-        raise Error(
-            "QuicListener.run: reactor wiring not yet implemented."
-            " Track Q3 follow-up commit lands the UDP socket bind"
-            " plus the per-datagram dispatch loop. The rustls"
-            " QUIC binding (Track Q2) and OpenSSL AEAD backend"
-            " (Track Q1) must be in place first."
+        if len(datagram) < 1:
+            return -1
+        var first = Int(datagram[0])
+        var is_long = (first & 0x80) != 0
+        if is_long:
+            return self._dispatch_long(datagram, peer)
+        return self._dispatch_short(datagram, peer)
+
+    def _dispatch_long(
+        mut self, datagram: Span[UInt8, _], peer: SocketAddr
+    ) raises -> Int:
+        """Long-header path: parse the full header, route by DCID,
+        and accept an Initial packet against an unknown DCID."""
+        var lh: LongHeader
+        try:
+            lh = parse_long_header(datagram)
+        except:
+            return -1
+        var dcid_hex = cid_to_hex(lh.dcid)
+        var slot = self.cid_table.lookup(dcid_hex)
+        if slot >= 0:
+            return slot
+        if lh.packet_type == PACKET_TYPE_INITIAL:
+            return self._accept_initial(lh)
+        return -1
+
+    def _dispatch_short(
+        mut self, datagram: Span[UInt8, _], peer: SocketAddr
+    ) raises -> Int:
+        """Short-header path: parse with the listener's pinned
+        DCID length, route by DCID."""
+        var sh_dcid_len = self.config.local_cid_length
+        if sh_dcid_len <= 0 or sh_dcid_len > MAX_CID_LENGTH:
+            return -1
+        var sh = parse_short_header(datagram, sh_dcid_len)
+        var dcid_hex = cid_to_hex(sh.dcid)
+        return self.cid_table.lookup(dcid_hex)
+
+    def _accept_initial(mut self, lh: LongHeader) raises -> Int:
+        """Allocate a new connection slot for an Initial packet
+        with an unknown DCID.
+
+        The server registers the client-chosen DCID in
+        :attr:`cid_table` so subsequent Initials addressed to
+        the same DCID route here. RFC 9000 §7.2 says the server
+        SHOULD choose its own SCID and switch to it on the
+        server-side response; that follow-up is part of the
+        per-packet wiring in commit 2/5 of this track.
+        """
+        var local_cid = lh.dcid.copy()
+        var peer_cid = lh.scid.copy()
+        var qc = QuicConnection(
+            local_cid,
+            peer_cid,
+            self.config.cc_choice,
+            self.config.max_idle_timeout_ms * UInt64(1_000),
+            self.config.initial_max_data,
         )
+        var slot = len(self.connections)
+        self.connections.append(qc^)
+        self.cid_table.register(cid_to_hex(local_cid), slot)
+        return slot
+
+    def tick(mut self, timeout_ms: Int = 100) raises -> Bool:
+        """Drain at most one inbound datagram.
+
+        Returns ``True`` if a datagram was received + dispatched,
+        ``False`` if ``recv_from`` timed out before any datagram
+        arrived. Callers use this when they need to multiplex
+        the QUIC event loop with other work (tests + the
+        ALPN-dispatching HTTP server).
+
+        ``timeout_ms`` is applied via ``SO_RCVTIMEO``; the
+        default 100 ms is the same shutdown-poll cadence
+        :meth:`run` uses.
+        """
+        self._socket.set_recv_timeout(timeout_ms)
+        var buf = List[UInt8]()
+        buf.resize(Int(self.config.max_udp_payload_size), 0)
+        var sender: SocketAddr
+        var got: Int
+        try:
+            var pair = self._socket.recv_from(Span[UInt8, _](buf))
+            got = pair[0]
+            sender = pair[1]
+        except e:
+            # ``UdpSocket.recv_from`` raises :class:`Timeout` for
+            # both ``EAGAIN`` and ``EWOULDBLOCK``; the dispatch
+            # loop treats both as "no datagram this tick".
+            var msg = String(e)
+            if msg.startswith("Timeout") or msg.startswith("recvfrom"):
+                return False
+            raise e^
+        if got <= 0:
+            return False
+        _ = self.dispatch_datagram(Span[UInt8, _](buf[:got]), sender)
+        return True
+
+    def run(mut self) raises:
+        """Run the listener's event loop. Blocks until
+        :meth:`shutdown` flips the stop flag.
+
+        Each iteration drains one datagram (or times out after
+        100 ms so the stop flag is observed promptly). The
+        per-packet decrypt + state-machine dispatch wiring lands
+        with commit 2/5 of this track; this commit ships the
+        UDP bind + the dispatcher + the routing table.
+        """
+        while not self._stopping:
+            _ = self.tick(timeout_ms=100)
+
+    def shutdown(mut self):
+        """Request the event loop to exit. Idempotent; safe to
+        call from a signal handler (sets a single Bool flag)."""
+        self._stopping = True
+
+    def close(mut self):
+        """Close the underlying UDP socket. Idempotent. The
+        :class:`UdpSocket` destructor also closes the fd, so
+        explicit calls are only required when callers want to
+        free the port before the listener goes out of scope."""
+        self._socket.close()

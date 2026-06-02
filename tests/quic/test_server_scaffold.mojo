@@ -1,11 +1,11 @@
-"""Unit tests for the QUIC server reactor scaffold
-(``flare.quic.server`` -- Track Q3).
+"""Unit tests for the QUIC server reactor carriers
+(``flare.quic.server`` -- Track Q3-W).
 
-The full reactor wiring (UDP bind, per-datagram dispatch, PTO
-timer integration, rustls + AEAD plumbing) lands in a focused
-follow-up commit. This suite pins the carrier shapes + the typed
-boundary the H3 server (Track Q4) and ALPN dispatcher (Track Q5)
-build against.
+The reactor wiring landed in Track Q3-W commit 1/5 (UDP bind +
+per-datagram dispatch); this suite covers the carrier shapes
+that downstream tracks (H3 dispatch -- Q4-W, ALPN dispatcher
+-- Q5-W) build against. The reactor-loop tests live in
+``tests/quic/test_quic_reactor.mojo``.
 
 Properties covered:
 
@@ -16,8 +16,6 @@ Properties covered:
    sans-I/O :class:`flare.quic.state.Connection`.
 3. :class:`ConnectionIdTable` registers / looks up / retires
    correctly across the small-slot + overflow path.
-4. :meth:`QuicListener.run` raises a clear error pointing at the
-   reactor follow-up commit.
 """
 
 from std.testing import assert_equal, assert_false, assert_true
@@ -28,7 +26,6 @@ from flare.quic import (
     ConnectionIdTable,
     QuicAead,
     QuicConnection,
-    QuicListener,
     QuicServerConfig,
 )
 
@@ -141,30 +138,6 @@ def test_cid_table_register_overwrites() raises:
     assert_equal(len(table), 1)
 
 
-def test_listener_not_bound_before_run() raises:
-    """A freshly-constructed :class:`QuicListener` reports
-    ``bound() == False`` so callers can confirm the bind hasn't
-    happened yet."""
-    var cfg = QuicServerConfig()
-    var listener = QuicListener(cfg)
-    assert_false(listener.bound())
-    assert_equal(len(listener.cid_table), 0)
-
-
-def test_listener_run_raises_pending_reactor_wiring() raises:
-    """:meth:`QuicListener.run` raises a clear error pointing
-    at the Track Q3 follow-up commit so callers using the
-    scaffold get a loud failure rather than a silent no-op."""
-    var cfg = QuicServerConfig()
-    var listener = QuicListener(cfg)
-    var raised = False
-    try:
-        listener.run()
-    except:
-        raised = True
-    assert_true(raised, "expected QuicListener.run to raise")
-
-
 def main() raises:
     test_config_defaults()
     test_config_carries_overrides()
@@ -174,6 +147,4 @@ def main() raises:
     test_cid_table_register_lookup_retire()
     test_cid_table_lookup_missing_returns_minus_one()
     test_cid_table_register_overwrites()
-    test_listener_not_bound_before_run()
-    test_listener_run_raises_pending_reactor_wiring()
-    print("test_quic_server_scaffold: 10 passed")
+    print("test_quic_server_scaffold: 8 passed")

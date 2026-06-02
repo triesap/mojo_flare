@@ -228,6 +228,7 @@ from .server import (
     QuicConnection,
     QuicListener,
     QuicServerConfig,
+    cid_to_hex,
 )
 from .state import (
     CONN_STATE_CLOSED,
