@@ -892,3 +892,174 @@ extern "C" int flare_hmac_sha256_verify(const uint8_t* key, size_t key_len,
      * via early-return on first mismatching byte. */
     return CRYPTO_memcmp(computed, mac_32, 32) == 0 ? 1 : 0;
 }
+
+/* ── QUIC AEAD (RFC 9001 §5.3) ──────────────────────────────────────────── */
+
+#include <openssl/evp.h>
+
+namespace {
+
+/* Pick the OpenSSL EVP_CIPHER for the cipher_id + validate key length.
+ * Returns NULL on misconfiguration. */
+const EVP_CIPHER* quic_aead_cipher(int cipher_id, size_t key_len) {
+    switch (cipher_id) {
+        case FLARE_QUIC_AEAD_AES_128_GCM:
+            return (key_len == 16) ? EVP_aes_128_gcm() : nullptr;
+        case FLARE_QUIC_AEAD_AES_256_GCM:
+            return (key_len == 32) ? EVP_aes_256_gcm() : nullptr;
+        case FLARE_QUIC_AEAD_CHACHA20_POLY1305:
+            return (key_len == 32) ? EVP_chacha20_poly1305() : nullptr;
+        default:
+            return nullptr;
+    }
+}
+
+/* RFC 9001 §5.3 nonce construction: nonce = iv XOR (pn padded BE to 12).
+ *
+ * The packet number is BE-encoded into the *low* 8 bytes of a 12-byte
+ * zero buffer; the upper 4 bytes stay zero so the XOR leaves the
+ * iv's first 4 bytes unchanged. This matches every RFC 9001 / RFC 9369
+ * test vector. */
+void build_nonce(const uint8_t* iv, uint64_t pn, uint8_t out[12]) {
+    uint8_t pn_be[12] = {0};
+    pn_be[4]  = (uint8_t)((pn >> 56) & 0xff);
+    pn_be[5]  = (uint8_t)((pn >> 48) & 0xff);
+    pn_be[6]  = (uint8_t)((pn >> 40) & 0xff);
+    pn_be[7]  = (uint8_t)((pn >> 32) & 0xff);
+    pn_be[8]  = (uint8_t)((pn >> 24) & 0xff);
+    pn_be[9]  = (uint8_t)((pn >> 16) & 0xff);
+    pn_be[10] = (uint8_t)((pn >>  8) & 0xff);
+    pn_be[11] = (uint8_t)( pn        & 0xff);
+    for (int i = 0; i < 12; i++) out[i] = iv[i] ^ pn_be[i];
+}
+
+} /* anonymous namespace */
+
+extern "C" int flare_quic_aead_build_nonce(const uint8_t* iv, uint64_t pn,
+                                             uint8_t* out_12) {
+    if (!iv || !out_12) return -1;
+    build_nonce(iv, pn, out_12);
+    return 0;
+}
+
+extern "C" int flare_quic_aead_seal(int cipher_id,
+                                     const uint8_t* key, size_t key_len,
+                                     const uint8_t* iv,
+                                     uint64_t pn,
+                                     const uint8_t* aad, size_t aad_len,
+                                     const uint8_t* plaintext, size_t plaintext_len,
+                                     uint8_t* out, size_t out_cap,
+                                     size_t* written) {
+    if (!key || !iv || !out || !written) return -1;
+    if (aad_len > 0 && !aad) return -1;
+    if (plaintext_len > 0 && !plaintext) return -1;
+    /* Caller MUST size out for ciphertext + 16-byte tag. */
+    if (out_cap < plaintext_len + FLARE_QUIC_AEAD_TAG_LEN) return -1;
+
+    const EVP_CIPHER* cipher = quic_aead_cipher(cipher_id, key_len);
+    if (!cipher) return -1;
+
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) {
+        capture_openssl_errors();
+        return -1;
+    }
+
+    uint8_t nonce[FLARE_QUIC_AEAD_NONCE_LEN];
+    build_nonce(iv, pn, nonce);
+
+    int rc = -1;
+    int outl = 0;
+    do {
+        if (EVP_EncryptInit_ex(ctx, cipher, nullptr, nullptr, nullptr) != 1) break;
+        /* All three RFC 9001 ciphers use a 12-byte IV by default; the
+         * SET_IVLEN call is harmless for ChaCha20-Poly1305 and required
+         * for the AES-GCM variants on OpenSSL < 1.1.0 (current pin is
+         * 3.6.1 but we keep the call for cross-version safety). */
+        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_IVLEN,
+                                FLARE_QUIC_AEAD_NONCE_LEN, nullptr) != 1) break;
+        if (EVP_EncryptInit_ex(ctx, nullptr, nullptr, key, nonce) != 1) break;
+        if (aad_len > 0) {
+            if (EVP_EncryptUpdate(ctx, nullptr, &outl, aad, (int)aad_len) != 1) break;
+        }
+        int ct_written = 0;
+        if (EVP_EncryptUpdate(ctx, out, &ct_written, plaintext,
+                              (int)plaintext_len) != 1) break;
+        int final_written = 0;
+        if (EVP_EncryptFinal_ex(ctx, out + ct_written, &final_written) != 1) break;
+        const size_t ct_total = (size_t)ct_written + (size_t)final_written;
+        if (ct_total != plaintext_len) break;
+        /* Append the 16-byte tag. */
+        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_GET_TAG,
+                                FLARE_QUIC_AEAD_TAG_LEN,
+                                out + ct_total) != 1) break;
+        *written = ct_total + FLARE_QUIC_AEAD_TAG_LEN;
+        rc = 0;
+    } while (0);
+
+    if (rc != 0) capture_openssl_errors();
+    EVP_CIPHER_CTX_free(ctx);
+    return rc;
+}
+
+extern "C" int flare_quic_aead_open(int cipher_id,
+                                     const uint8_t* key, size_t key_len,
+                                     const uint8_t* iv,
+                                     uint64_t pn,
+                                     const uint8_t* aad, size_t aad_len,
+                                     const uint8_t* ct, size_t ct_len,
+                                     uint8_t* out, size_t out_cap,
+                                     size_t* written) {
+    if (!key || !iv || !ct || !out || !written) return -1;
+    if (aad_len > 0 && !aad) return -1;
+    if (ct_len < FLARE_QUIC_AEAD_TAG_LEN) return -1;
+    const size_t pt_len = ct_len - FLARE_QUIC_AEAD_TAG_LEN;
+    if (out_cap < pt_len) return -1;
+
+    const EVP_CIPHER* cipher = quic_aead_cipher(cipher_id, key_len);
+    if (!cipher) return -1;
+
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) {
+        capture_openssl_errors();
+        return -1;
+    }
+
+    uint8_t nonce[FLARE_QUIC_AEAD_NONCE_LEN];
+    build_nonce(iv, pn, nonce);
+
+    int rc = -1;
+    int outl = 0;
+    do {
+        if (EVP_DecryptInit_ex(ctx, cipher, nullptr, nullptr, nullptr) != 1) break;
+        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_IVLEN,
+                                FLARE_QUIC_AEAD_NONCE_LEN, nullptr) != 1) break;
+        if (EVP_DecryptInit_ex(ctx, nullptr, nullptr, key, nonce) != 1) break;
+        if (aad_len > 0) {
+            if (EVP_DecryptUpdate(ctx, nullptr, &outl, aad, (int)aad_len) != 1) break;
+        }
+        int pt_written = 0;
+        if (EVP_DecryptUpdate(ctx, out, &pt_written, ct, (int)pt_len) != 1) break;
+        /* Set the expected tag *before* DecryptFinal_ex; OpenSSL needs
+         * it to validate the AEAD output. */
+        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_TAG,
+                                FLARE_QUIC_AEAD_TAG_LEN,
+                                (void*)(ct + pt_len)) != 1) break;
+        int final_written = 0;
+        int final_rc = EVP_DecryptFinal_ex(ctx, out + pt_written, &final_written);
+        if (final_rc != 1) {
+            /* Tag verification failed -- this is the RFC 9001 §5.3
+             * "invalid packet" path. Distinct from misconfiguration
+             * so callers can drop quietly rather than abort. */
+            rc = -2;
+            break;
+        }
+        *written = (size_t)pt_written + (size_t)final_written;
+        if (*written != pt_len) break;
+        rc = 0;
+    } while (0);
+
+    if (rc == -1) capture_openssl_errors();
+    EVP_CIPHER_CTX_free(ctx);
+    return rc;
+}

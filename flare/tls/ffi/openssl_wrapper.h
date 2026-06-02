@@ -391,6 +391,120 @@ int flare_hmac_sha256_verify(const uint8_t* key, size_t key_len,
                               const uint8_t* msg, size_t msg_len,
                               const uint8_t* mac_32);
 
+/* ── QUIC AEAD (RFC 9001 §5.3) ──────────────────────────────────────────── */
+
+/*
+ * QUIC packet AEAD seal / open against OpenSSL EVP_CIPHER_CTX with
+ * deterministic IV-XOR per RFC 9001 §5.3:
+ *
+ *   nonce = iv XOR (zero-padded packet number, big-endian, 12 bytes)
+ *
+ * The caller passes the 12-byte ``iv`` derived from the QUIC key
+ * schedule (``hkdf_expand_label(secret, "quic iv", "", 12)``) and
+ * the packet number as a ``uint64_t``; the FFI builds the nonce
+ * locally so callers cannot accidentally double-XOR. The packet
+ * number is BE-encoded into the low 8 bytes of the nonce buffer
+ * (the upper 4 bytes stay as the iv prefix) before the XOR.
+ *
+ * Cipher selection (``cipher_id`` parameter):
+ *
+ *   1  AES-128-GCM     (16-byte key, 16-byte tag) -- RFC 9001 §5.1
+ *   2  AES-256-GCM     (32-byte key, 16-byte tag)
+ *   3  ChaCha20-Poly1305 (32-byte key, 16-byte tag)
+ *
+ * The tag is appended to the ciphertext: ``ct || tag``. The caller
+ * supplies ``out`` with capacity ``plaintext_len + tag_len``;
+ * ``written`` receives the actual byte count.
+ *
+ * Returns 0 on success, -1 on cipher misconfiguration (wrong key
+ * length, NULL pointers, bad cipher_id), -2 on AEAD tag failure
+ * (decrypt only -- the ciphertext was modified / forged or the
+ * packet number / aad does not match the sealer's).
+ */
+
+/* Cipher IDs -- stable across versions; the Mojo side maps these to
+ * ``QuicAead`` enum values. */
+#define FLARE_QUIC_AEAD_AES_128_GCM      1
+#define FLARE_QUIC_AEAD_AES_256_GCM      2
+#define FLARE_QUIC_AEAD_CHACHA20_POLY1305 3
+
+/* All RFC 9001 AEADs use a 16-byte authentication tag (RFC 9001 §5.3
+ * second paragraph: "The output tag length is 16 octets, the default
+ * for these AEAD algorithms"). */
+#define FLARE_QUIC_AEAD_TAG_LEN 16
+
+/* QUIC AEAD nonce is 12 bytes for all three ciphers (RFC 9001 §5.3,
+ * referring to RFC 5116 §3.1 default and ChaCha20-Poly1305 spec).
+ * The FFI builds the nonce internally from ``iv`` + ``pn``. */
+#define FLARE_QUIC_AEAD_NONCE_LEN 12
+
+/*
+ * Seal a QUIC packet payload.
+ *
+ * @param cipher_id    One of ``FLARE_QUIC_AEAD_*`` constants.
+ * @param key          AEAD key (length per ``cipher_id``).
+ * @param key_len      Length of ``key``; must match the cipher.
+ * @param iv           12-byte AEAD IV from the key schedule.
+ * @param pn           Packet number to be XOR'd into the nonce
+ *                     (BE-encoded into the low 8 bytes).
+ * @param aad          Associated data (the QUIC packet header,
+ *                     including the header-protection-recovered
+ *                     first byte and packet number).
+ * @param aad_len      Length of ``aad``.
+ * @param plaintext    Plaintext bytes to encrypt.
+ * @param plaintext_len Length of ``plaintext``.
+ * @param out          Caller-allocated buffer; capacity must be
+ *                     >= ``plaintext_len + FLARE_QUIC_AEAD_TAG_LEN``.
+ * @param out_cap      Capacity of ``out``.
+ * @param written      Receives the number of bytes written into ``out``
+ *                     on success (== plaintext_len + tag_len).
+ * @return 0 on success, -1 on misconfiguration.
+ */
+int flare_quic_aead_seal(int cipher_id,
+                          const uint8_t* key, size_t key_len,
+                          const uint8_t* iv,
+                          uint64_t pn,
+                          const uint8_t* aad, size_t aad_len,
+                          const uint8_t* plaintext, size_t plaintext_len,
+                          uint8_t* out, size_t out_cap,
+                          size_t* written);
+
+/*
+ * Open a QUIC packet ciphertext + tag.
+ *
+ * The ciphertext buffer ``ct`` must hold ``ct || tag`` (the layout
+ * ``flare_quic_aead_seal`` produces). On success the recovered
+ * plaintext is written to ``out`` and ``written`` receives the
+ * plaintext length (== ``ct_len - FLARE_QUIC_AEAD_TAG_LEN``).
+ *
+ * @return 0 on success; -1 on misconfiguration; -2 on AEAD tag
+ *         failure (RFC 9001 §5.3 invalid packet -- caller drops).
+ */
+int flare_quic_aead_open(int cipher_id,
+                          const uint8_t* key, size_t key_len,
+                          const uint8_t* iv,
+                          uint64_t pn,
+                          const uint8_t* aad, size_t aad_len,
+                          const uint8_t* ct, size_t ct_len,
+                          uint8_t* out, size_t out_cap,
+                          size_t* written);
+
+/*
+ * Test-only: build the deterministic AEAD nonce from ``iv`` + ``pn``.
+ *
+ * Mirrors the internal nonce-construction step the seal / open
+ * functions run before calling OpenSSL, so test code can pin the
+ * exact bytes the AEAD sees against the RFC 9001 Appendix A vectors
+ * without instrumenting the cpp.
+ *
+ * @param iv      12-byte AEAD IV.
+ * @param pn      Packet number.
+ * @param out_12  Caller-allocated 12-byte buffer for the nonce.
+ * @return 0 on success, -1 on NULL pointer.
+ */
+int flare_quic_aead_build_nonce(const uint8_t* iv, uint64_t pn,
+                                 uint8_t* out_12);
+
 #ifdef __cplusplus
 }
 #endif
