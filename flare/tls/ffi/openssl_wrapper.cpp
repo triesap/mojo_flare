@@ -1002,6 +1002,107 @@ extern "C" int flare_quic_aead_seal(int cipher_id,
     return rc;
 }
 
+/* ── QUIC header protection mask (RFC 9001 §5.4) ───────────────────────── */
+
+namespace {
+
+/* AES-ECB mask: one-block encrypt of the sample, take first 5 bytes
+ * (RFC 9001 §5.4.3). The single-block ECB call here is safe -- the
+ * sample is treated as a one-time tweak, never directly encrypted
+ * data. The Mojo side guarantees fresh samples per packet. */
+int aes_ecb_mask(const EVP_CIPHER* cipher,
+                  const uint8_t* hp_key,
+                  const uint8_t* sample,
+                  uint8_t out_5[5]) {
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) {
+        capture_openssl_errors();
+        return -1;
+    }
+    int rc = -1;
+    do {
+        /* ECB has no IV; padding off so we get exactly 16 bytes out
+         * from 16 bytes in. */
+        if (EVP_EncryptInit_ex(ctx, cipher, nullptr, hp_key, nullptr) != 1) break;
+        if (EVP_CIPHER_CTX_set_padding(ctx, 0) != 1) break;
+        uint8_t block[16];
+        int outl = 0;
+        if (EVP_EncryptUpdate(ctx, block, &outl, sample, 16) != 1) break;
+        if (outl != 16) break;
+        int finall = 0;
+        uint8_t pad_tail[16];
+        if (EVP_EncryptFinal_ex(ctx, pad_tail, &finall) != 1) break;
+        if (finall != 0) break;
+        /* RFC 9001 §5.4.3: mask is the first 5 bytes of the ECB
+         * encryption of the sample. */
+        for (int i = 0; i < 5; i++) out_5[i] = block[i];
+        rc = 0;
+    } while (0);
+    if (rc != 0) capture_openssl_errors();
+    EVP_CIPHER_CTX_free(ctx);
+    return rc;
+}
+
+/* ChaCha20 mask: run the cipher as a stream cipher with the sample
+ * split into counter (4-byte LE) + nonce (12 bytes), then encrypt
+ * 5 zero bytes -- the output is the mask (RFC 9001 §5.4.4). */
+int chacha20_mask(const uint8_t* hp_key,
+                   const uint8_t* sample,
+                   uint8_t out_5[5]) {
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) {
+        capture_openssl_errors();
+        return -1;
+    }
+    int rc = -1;
+    do {
+        const EVP_CIPHER* chacha = EVP_chacha20();
+        if (!chacha) break;
+        /* EVP_chacha20's IV is the 16-byte counter || nonce blob;
+         * RFC 9001 §5.4.4 splits the sample as
+         *   counter = u32 LE of sample[0..4]
+         *   nonce   = sample[4..16]
+         * OpenSSL takes them concatenated low-counter-first, which
+         * matches the sample layout exactly. */
+        if (EVP_EncryptInit_ex(ctx, chacha, nullptr, hp_key, sample) != 1) break;
+        if (EVP_CIPHER_CTX_set_padding(ctx, 0) != 1) break;
+        const uint8_t zeros[5] = {0, 0, 0, 0, 0};
+        int outl = 0;
+        if (EVP_EncryptUpdate(ctx, out_5, &outl, zeros, 5) != 1) break;
+        if (outl != 5) break;
+        int finall = 0;
+        uint8_t pad_tail[5];
+        if (EVP_EncryptFinal_ex(ctx, pad_tail, &finall) != 1) break;
+        if (finall != 0) break;
+        rc = 0;
+    } while (0);
+    if (rc != 0) capture_openssl_errors();
+    EVP_CIPHER_CTX_free(ctx);
+    return rc;
+}
+
+} /* anonymous namespace */
+
+extern "C" int flare_quic_hp_mask(int cipher_id,
+                                    const uint8_t* hp_key, size_t hp_key_len,
+                                    const uint8_t* sample,
+                                    uint8_t* out_5) {
+    if (!hp_key || !sample || !out_5) return -1;
+    switch (cipher_id) {
+        case FLARE_QUIC_HP_AES_128:
+            if (hp_key_len != 16) return -1;
+            return aes_ecb_mask(EVP_aes_128_ecb(), hp_key, sample, out_5);
+        case FLARE_QUIC_HP_AES_256:
+            if (hp_key_len != 32) return -1;
+            return aes_ecb_mask(EVP_aes_256_ecb(), hp_key, sample, out_5);
+        case FLARE_QUIC_HP_CHACHA20:
+            if (hp_key_len != 32) return -1;
+            return chacha20_mask(hp_key, sample, out_5);
+        default:
+            return -1;
+    }
+}
+
 extern "C" int flare_quic_aead_open(int cipher_id,
                                      const uint8_t* key, size_t key_len,
                                      const uint8_t* iv,

@@ -489,6 +489,58 @@ int flare_quic_aead_open(int cipher_id,
                           uint8_t* out, size_t out_cap,
                           size_t* written);
 
+/* ── QUIC header protection mask (RFC 9001 §5.4) ───────────────────────── */
+
+/*
+ * QUIC header protection takes a 16-byte sample from the
+ * ciphertext (starting at packet-number-offset + 4 -- see RFC 9001
+ * §5.4.2 for exact byte placement) and derives a 5-byte mask that
+ * XORs into the protected header bits:
+ *
+ *   byte[0] low 4 bits (long header) or low 5 bits (short header)
+ *   byte[pn_offset .. pn_offset + pn_length] (1-4 bytes)
+ *
+ * Mask construction per cipher (RFC 9001 §5.4.3 / §5.4.4):
+ *
+ *   AES-128-ECB sample -> first 5 bytes of AES-ECB(hp_key, sample)
+ *   AES-256-ECB sample -> first 5 bytes of AES-ECB(hp_key, sample)
+ *   ChaCha20 sample    -> ChaCha20(hp_key, counter=u32le(sample[0..4]),
+ *                                  nonce=sample[4..16]) over 5 zero bytes
+ *
+ * Cipher IDs reuse the AEAD constants for AES (a 16-byte sample
+ * for AES-128, 32-byte key for AES-256); ChaCha20 has its own.
+ */
+
+/* Header-protection cipher IDs.  Distinct from AEAD IDs because the
+ * mask path is different (single-block ECB for AES, raw ChaCha20
+ * stream for ChaCha20-Poly1305 AEAD). */
+#define FLARE_QUIC_HP_AES_128 1
+#define FLARE_QUIC_HP_AES_256 2
+#define FLARE_QUIC_HP_CHACHA20 3
+
+/* Sample length is 16 bytes for all three ciphers (RFC 9001 §5.4.2). */
+#define FLARE_QUIC_HP_SAMPLE_LEN 16
+
+/* Mask length is 5 bytes -- 1 for the header byte, up to 4 for the
+ * packet number (RFC 9001 §5.4.1). */
+#define FLARE_QUIC_HP_MASK_LEN 5
+
+/*
+ * Derive the 5-byte header-protection mask from a 16-byte sample.
+ *
+ * @param cipher_id  One of FLARE_QUIC_HP_* constants.
+ * @param hp_key     Header-protection key (16 bytes for AES-128,
+ *                   32 bytes for AES-256, 32 bytes for ChaCha20).
+ * @param hp_key_len Length of hp_key; must match cipher_id.
+ * @param sample     16-byte sample from the ciphertext.
+ * @param out_5      Caller-allocated 5-byte buffer for the mask.
+ * @return 0 on success, -1 on misconfiguration.
+ */
+int flare_quic_hp_mask(int cipher_id,
+                        const uint8_t* hp_key, size_t hp_key_len,
+                        const uint8_t* sample,
+                        uint8_t* out_5);
+
 /*
  * Test-only: build the deterministic AEAD nonce from ``iv`` + ``pn``.
  *
