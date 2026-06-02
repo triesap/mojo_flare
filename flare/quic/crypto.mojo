@@ -29,20 +29,17 @@ The full QUIC crypto story has three slabs that compose:
    :class:`RustlsQuicCrypto` will wire it to the rustls QUIC
    binding once Track Q2 lands.
 
-## Scope of this commit (Track Q1 scaffold)
+## Backends
 
-The HKDF + HKDF-Expand-Label + initial-secret math is wired
-end-to-end against the RFC 9001 Appendix A test vectors. The
-AEAD trait surface is defined and a stub
-:class:`StubQuicCrypto` raises a clear ``NotImplemented`` error
-on encrypt/decrypt. The OpenSSL FFI binding for AES-GCM /
-ChaCha20-Poly1305 is the next focused commit; the math + the
-trait + the labels do not depend on it.
-
-The intent is to lock the API shape now so the QUIC server
-reactor (Track Q3), the H3 server (Track Q4), and the rustls
-binding (Track Q2) can all build against this trait while the
-AEAD backend ships its own focused commit.
+- :class:`StubQuicCrypto` -- typed sentinel for tests that
+  want to assert the trait boundary without driving a real
+  AEAD. Encrypt / decrypt / mask raise ``NotImplemented``.
+- :class:`OpenSslQuicCrypto` -- production AEAD + header-
+  protection backend. Binds the ``flare_quic_aead_*`` /
+  ``flare_quic_hp_mask`` FFI thunks from ``libflare_tls.so``
+  to the trait surface. Constructs from a 32-byte direction
+  secret via :py:meth:`OpenSslQuicCrypto.from_secret`, which
+  runs the RFC 9001 paragraph 5.1 schedule.
 
 References:
 - RFC 5869 "HMAC-based Extract-and-Expand Key Derivation Function".
@@ -52,9 +49,11 @@ References:
 """
 
 from std.collections import List, Optional
+from std.ffi import OwnedDLHandle, c_int
 from std.memory import Span
 
 from flare.crypto.hmac import hmac_sha256
+from flare.net.socket import _find_flare_lib
 
 
 # ── RFC 9001 §5.2 initial salt (QUIC v1) ────────────────────────────────
@@ -430,3 +429,357 @@ struct StubQuicCrypto(Copyable, Movable, QuicCrypto):
             "StubQuicCrypto.header_protection_mask: OpenSSL backend"
             " not wired yet (Track Q1 follow-up commit)."
         )
+
+
+# ── RFC 9001 §5.1 packet-protection key schedule ───────────────────────
+
+
+def aead_key_length(aead: Int) raises -> Int:
+    """Per-AEAD key length in bytes (RFC 9001 §5.1 + RFC 8439)."""
+    if aead == QuicAead.AES_128_GCM:
+        return 16
+    if aead == QuicAead.AES_256_GCM:
+        return 32
+    if aead == QuicAead.CHACHA20_POLY1305:
+        return 32
+    raise Error("aead_key_length: unknown AEAD codepoint")
+
+
+@fieldwise_init
+struct PacketKeys(Copyable, Movable):
+    """Per-direction packet-protection keys derived from a 32-byte
+    secret per RFC 9001 §5.1.
+
+    The handshake produces two secrets per encryption level (one
+    per direction); each becomes a ``PacketKeys`` via
+    :func:`derive_packet_keys`.
+    """
+
+    var aead: Int
+    """``QuicAead`` codepoint these keys are scheduled for."""
+
+    var key: List[UInt8]
+    """AEAD key -- 16 bytes (AES-128) or 32 bytes (AES-256, ChaCha20)."""
+
+    var iv: List[UInt8]
+    """AEAD IV -- 12 bytes (RFC 9001 §5.3 nonce-construction base)."""
+
+    var hp: List[UInt8]
+    """Header-protection key -- same length as ``key`` for AES;
+    32 bytes for ChaCha20-Poly1305 (RFC 9001 §5.4)."""
+
+
+def derive_packet_keys(secret: Span[UInt8, _], aead: Int) raises -> PacketKeys:
+    """RFC 9001 §5.1 -- derive ``(key, iv, hp)`` from a 32-byte
+    per-direction secret.
+
+    Labels are the canonical RFC 9001 §5.1 set:
+
+    - ``"quic key"`` -- AEAD key (key length per AEAD).
+    - ``"quic iv"``  -- AEAD IV (always 12 bytes).
+    - ``"quic hp"``  -- header-protection key (same length as
+      AEAD key for AES; 32 bytes for ChaCha20).
+
+    The same schedule applies to initial, handshake, and 1-RTT
+    secrets; only the source secret changes. The handshake +
+    1-RTT secrets come from the TLS 1.3 exporter (RFC 9001 §7
+    handshake state machine, wired in Track Q2 once rustls is
+    integrated).
+    """
+    var key_len = aead_key_length(aead)
+    var key = hkdf_expand_label_empty_context(secret, "quic key", key_len)
+    var iv = hkdf_expand_label_empty_context(secret, "quic iv", 12)
+    var hp = hkdf_expand_label_empty_context(secret, "quic hp", key_len)
+    return PacketKeys(aead=aead, key=key^, iv=iv^, hp=hp^)
+
+
+# ── OpenSslQuicCrypto -- production AEAD + HP backend ──────────────────
+
+
+# Header-protection cipher IDs the FFI accepts; distinct from the
+# AEAD IDs because the mask path is its own primitive.
+comptime _HP_AES_128: Int = 1
+comptime _HP_AES_256: Int = 2
+comptime _HP_CHACHA20: Int = 3
+
+
+# AEAD cipher IDs the FFI accepts (must match
+# FLARE_QUIC_AEAD_* in flare/tls/ffi/openssl_wrapper.h).
+comptime _AEAD_AES_128_GCM_C: Int = 1
+comptime _AEAD_AES_256_GCM_C: Int = 2
+comptime _AEAD_CHACHA20_POLY1305_C: Int = 3
+
+
+comptime _AEAD_TAG_LEN: Int = 16
+comptime _AEAD_NONCE_LEN: Int = 12
+comptime _HP_SAMPLE_LEN: Int = 16
+comptime _HP_MASK_LEN: Int = 5
+
+
+def _aead_to_ffi(aead: Int) raises -> Int:
+    """Map the ``QuicAead`` Mojo enum to the FFI cipher_id constant."""
+    if aead == QuicAead.AES_128_GCM:
+        return _AEAD_AES_128_GCM_C
+    if aead == QuicAead.AES_256_GCM:
+        return _AEAD_AES_256_GCM_C
+    if aead == QuicAead.CHACHA20_POLY1305:
+        return _AEAD_CHACHA20_POLY1305_C
+    raise Error("OpenSslQuicCrypto: unknown AEAD codepoint")
+
+
+def _aead_to_hp_ffi(aead: Int) raises -> Int:
+    """Map ``QuicAead`` to the *header-protection* FFI cipher_id."""
+    if aead == QuicAead.AES_128_GCM:
+        return _HP_AES_128
+    if aead == QuicAead.AES_256_GCM:
+        return _HP_AES_256
+    if aead == QuicAead.CHACHA20_POLY1305:
+        return _HP_CHACHA20
+    raise Error("OpenSslQuicCrypto: unknown AEAD codepoint")
+
+
+def _do_aead_seal(
+    read lib: OwnedDLHandle,
+    cipher_id: Int,
+    key: List[UInt8],
+    iv: List[UInt8],
+    pn: UInt64,
+    aad: List[UInt8],
+    plaintext: List[UInt8],
+    mut out: List[UInt8],
+) raises -> Int:
+    var seal_fn = lib.get_function[
+        def(
+            c_int,
+            Int,
+            Int,
+            Int,
+            UInt64,
+            Int,
+            Int,
+            Int,
+            Int,
+            Int,
+            Int,
+            Int,
+        ) thin abi("C") -> c_int
+    ]("flare_quic_aead_seal")
+    var written = List[Int](length=1, fill=0)
+    var rc = seal_fn(
+        c_int(cipher_id),
+        Int(key.unsafe_ptr()),
+        len(key),
+        Int(iv.unsafe_ptr()),
+        pn,
+        Int(aad.unsafe_ptr()),
+        len(aad),
+        Int(plaintext.unsafe_ptr()),
+        len(plaintext),
+        Int(out.unsafe_ptr()),
+        len(out),
+        Int(written.unsafe_ptr()),
+    )
+    if Int(rc) != 0:
+        raise Error("OpenSslQuicCrypto.encrypt: FFI rc=" + String(Int(rc)))
+    return written[0]
+
+
+def _do_aead_open(
+    read lib: OwnedDLHandle,
+    cipher_id: Int,
+    key: List[UInt8],
+    iv: List[UInt8],
+    pn: UInt64,
+    aad: List[UInt8],
+    ct: List[UInt8],
+    mut out: List[UInt8],
+) raises -> Int:
+    var open_fn = lib.get_function[
+        def(
+            c_int,
+            Int,
+            Int,
+            Int,
+            UInt64,
+            Int,
+            Int,
+            Int,
+            Int,
+            Int,
+            Int,
+            Int,
+        ) thin abi("C") -> c_int
+    ]("flare_quic_aead_open")
+    var written = List[Int](length=1, fill=0)
+    var rc = open_fn(
+        c_int(cipher_id),
+        Int(key.unsafe_ptr()),
+        len(key),
+        Int(iv.unsafe_ptr()),
+        pn,
+        Int(aad.unsafe_ptr()),
+        len(aad),
+        Int(ct.unsafe_ptr()),
+        len(ct),
+        Int(out.unsafe_ptr()),
+        len(out),
+        Int(written.unsafe_ptr()),
+    )
+    var rc_i = Int(rc)
+    if rc_i == -2:
+        raise Error(
+            "OpenSslQuicCrypto.decrypt: AEAD tag verification failed"
+            " (RFC 9001 paragraph 5.3 invalid packet)"
+        )
+    if rc_i != 0:
+        raise Error("OpenSslQuicCrypto.decrypt: FFI rc=" + String(rc_i))
+    return written[0]
+
+
+def _do_hp_mask(
+    read lib: OwnedDLHandle,
+    cipher_id: Int,
+    hp_key: List[UInt8],
+    sample: List[UInt8],
+    mut out: List[UInt8],
+) raises:
+    var mask_fn = lib.get_function[
+        def(c_int, Int, Int, Int, Int) thin abi("C") -> c_int
+    ]("flare_quic_hp_mask")
+    var rc = mask_fn(
+        c_int(cipher_id),
+        Int(hp_key.unsafe_ptr()),
+        len(hp_key),
+        Int(sample.unsafe_ptr()),
+        Int(out.unsafe_ptr()),
+    )
+    if Int(rc) != 0:
+        raise Error(
+            "OpenSslQuicCrypto.header_protection_mask: FFI rc="
+            + String(Int(rc))
+        )
+
+
+struct OpenSslQuicCrypto(Copyable, Movable, QuicCrypto):
+    """Production QUIC v1 AEAD + header-protection backend backed
+    by OpenSSL via the ``flare_quic_aead_*`` / ``flare_quic_hp_mask``
+    FFI thunks.
+
+    The carrier holds the per-direction ``PacketKeys`` (AEAD key,
+    AEAD IV, header-protection key) for a single encryption level
+    in a single direction. The QUIC server reactor maintains four
+    carriers per connection: client/server initial, handshake, and
+    1-RTT (the initial-secret pair gets dropped after the handshake
+    completes per RFC 9001 paragraph 4.9.1).
+
+    Construction:
+
+    - :py:meth:`from_secret` -- derive ``PacketKeys`` from a 32-byte
+      direction secret + AEAD codepoint, then wrap into the carrier.
+    - :py:meth:`__init__` -- bring-your-own ``PacketKeys`` for the
+      test path or when the keys come from an outboard schedule
+      (e.g. the rustls QUIC binding once Track Q2 lands).
+    """
+
+    var keys: PacketKeys
+
+    def __init__(out self, var keys: PacketKeys):
+        self.keys = keys^
+
+    @staticmethod
+    def from_secret(secret: Span[UInt8, _], aead_choice: Int) raises -> Self:
+        """Derive ``PacketKeys`` from ``secret`` per RFC 9001 §5.1
+        and wrap into a carrier ready to encrypt / decrypt against
+        the schedule's keys."""
+        var keys = derive_packet_keys(secret, aead_choice)
+        return Self(keys=keys^)
+
+    def aead(self) -> Int:
+        return self.keys.aead
+
+    def encrypt(
+        self,
+        plaintext: Span[UInt8, _],
+        associated_data: Span[UInt8, _],
+        packet_number: UInt64,
+    ) raises -> List[UInt8]:
+        var cipher_id = _aead_to_ffi(self.keys.aead)
+        var pt = List[UInt8]()
+        for i in range(len(plaintext)):
+            pt.append(plaintext[i])
+        var aad = List[UInt8]()
+        for i in range(len(associated_data)):
+            aad.append(associated_data[i])
+        # Output buffer = plaintext_len + 16-byte tag per RFC 9001
+        # paragraph 5.3 (RFC 5116 paragraph 3.1 default tag length).
+        var out = List[UInt8](
+            length=len(plaintext) + _AEAD_TAG_LEN, fill=UInt8(0)
+        )
+        var lib = OwnedDLHandle(_find_flare_lib())
+        var written = _do_aead_seal(
+            lib,
+            cipher_id,
+            self.keys.key,
+            self.keys.iv,
+            packet_number,
+            aad,
+            pt,
+            out,
+        )
+        # Trim in case the buffer was over-allocated (it shouldn't
+        # be -- the FFI writes exactly plaintext_len + tag_len).
+        while len(out) > written:
+            _ = out.pop()
+        return out^
+
+    def decrypt(
+        self,
+        ciphertext: Span[UInt8, _],
+        associated_data: Span[UInt8, _],
+        packet_number: UInt64,
+    ) raises -> List[UInt8]:
+        if len(ciphertext) < _AEAD_TAG_LEN:
+            raise Error(
+                "OpenSslQuicCrypto.decrypt: ciphertext shorter than"
+                " 16-byte AEAD tag"
+            )
+        var cipher_id = _aead_to_ffi(self.keys.aead)
+        var ct = List[UInt8]()
+        for i in range(len(ciphertext)):
+            ct.append(ciphertext[i])
+        var aad = List[UInt8]()
+        for i in range(len(associated_data)):
+            aad.append(associated_data[i])
+        var pt_len = len(ciphertext) - _AEAD_TAG_LEN
+        var out = List[UInt8](length=pt_len, fill=UInt8(0))
+        var lib = OwnedDLHandle(_find_flare_lib())
+        var written = _do_aead_open(
+            lib,
+            cipher_id,
+            self.keys.key,
+            self.keys.iv,
+            packet_number,
+            aad,
+            ct,
+            out,
+        )
+        while len(out) > written:
+            _ = out.pop()
+        return out^
+
+    def header_protection_mask(
+        self, sample: Span[UInt8, _]
+    ) raises -> List[UInt8]:
+        if len(sample) != _HP_SAMPLE_LEN:
+            raise Error(
+                "OpenSslQuicCrypto.header_protection_mask: sample"
+                " must be exactly 16 bytes (RFC 9001 paragraph 5.4.2)"
+            )
+        var cipher_id = _aead_to_hp_ffi(self.keys.aead)
+        var sample_bytes = List[UInt8]()
+        for i in range(len(sample)):
+            sample_bytes.append(sample[i])
+        var out = List[UInt8](length=_HP_MASK_LEN, fill=UInt8(0))
+        var lib = OwnedDLHandle(_find_flare_lib())
+        _do_hp_mask(lib, cipher_id, self.keys.hp, sample_bytes, out)
+        return out^
