@@ -1,0 +1,30 @@
+[package]
+name = "flare_bench_quinn_h3"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "server"
+path = "src/main.rs"
+
+# Pinned to the same major.minor revisions the v0.8 plan calls
+# out. Cargo.lock pins the exact patch revisions so the same
+# bytes ship on every EPYC 7R32 dev-box rebuild.
+[dependencies]
+quinn          = { version = "0.11.7", default-features = false, features = ["rustls", "runtime-tokio"] }
+h3             = "0.0.8"
+h3-quinn       = "0.0.10"
+rustls         = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
+tokio          = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync"] }
+bytes          = "1"
+http           = "1"
+rcgen          = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+futures        = "0.3"
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 1
+panic         = "abort"

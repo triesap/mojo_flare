@@ -1,59 +1,78 @@
-# quinn HTTP/3 baseline -- pending wiring
+# quinn HTTP/3 baseline
 
-`quinn` is the canonical Rust QUIC implementation; pairing it with
-`h3-quinn` gives a clean reference HTTP/3 server to compare flare's
-own h3 throughput against. The intent is the same as the
+`quinn` is the canonical Rust QUIC implementation; paired with
+`h3-quinn` it provides a clean reference HTTP/3 server to compare
+flare's own h3 throughput against. Same idea as the
 `benchmark/baselines/hyper/` baseline: a small Rust binary built
 via `cargo build --release --locked` that serves the same
-"hello, world" body the v0.6 throughput harness uses, but over
+"Hello, World!" body the v0.6 throughput harness uses, but over
 UDP + QUIC + h3 instead of TCP + TLS + h2.
 
-## Status
+## Build + run
 
-This directory is the scaffold layout only:
+```bash
+# Build (idempotent if cached; first build ~90-180s).
+pixi run -e bench cargo build --release --locked \
+    --manifest-path benchmark/baselines/quinn/Cargo.toml
 
-- `Cargo.toml` + a `src/main.rs` skeleton are not yet checked in.
-- `check.sh` + `run.sh` are not yet checked in.
-- The pinned versions for `quinn` / `h3` / `h3-quinn` go in
-  `Cargo.toml` when the baseline lands.
+# Start the server on port 8443 with FLARE_BENCH_WORKERS tokio
+# worker threads (default 4); writes the PID to
+# benchmark/results/.server.pid.
+FLARE_BENCH_PORT=8443 benchmark/baselines/quinn/run.sh
 
-The reason: the cross-framework HTTP/3 bench is a hard release
-gate per the v0.8 Phase D plan, but it requires the flare h3
-server itself to be wired end-to-end before the comparison is
-meaningful. The flare-side wiring is in flight:
+# Probe with h2load --npn-list=h3 once it's up.
+benchmark/baselines/quinn/check.sh
+```
 
-- Track Q1 follow-up -- the OpenSSL AEAD backend behind the
-  `QuicCrypto` trait (currently `StubQuicCrypto`).
-- Track Q2 follow-up -- the rustls Rust crate behind
-  `RustlsQuicAcceptor` (currently raises `NOT_BUILT`).
-- Track Q3 follow-up -- the QUIC reactor's UDP read loop +
-  per-datagram dispatch (currently `QuicListener.run` raises).
-- Track Q4 follow-up -- the H3 driver's per-stream
-  `H3RequestReader -> Handler -> response-writer` wiring
-  (currently `H3Connection.feed_stream_chunk` raises).
+## Route surface
 
-When those follow-ups land, the bench harness consults this
-directory + `benchmark/baselines/quiche/` for the matching
-external baseline binaries. Each baseline serves the same
-hello-world body the v0.6 throughput harness uses; the harness
-runs the same `h2load --npn-list=h3` workload against flare,
-quinn, and quiche, computes the five-run median + p99 / p99.9 /
-p99.99, and writes the result table to
-`benchmark/results/v0.8/h3/`.
+Mirrors `benchmark/baselines/hyper/src/main.rs` so the
+cross-framework bench compares the same payload across the wire
+shapes:
 
-## Pin guidance (when the baseline lands)
+| route       | method | body                                         |
+|-------------|--------|----------------------------------------------|
+| `/`         | GET    | `"Hello, World!"` (13 bytes)                 |
+| `/plaintext`| GET    | `"Hello, World!"` (13 bytes)                 |
+| `/4kb`      | GET    | 4096-byte buffer of `'x'`                    |
+| `/64kb`     | GET    | 65536-byte buffer of `'x'`                   |
+| `/1mb`      | GET    | 1048576-byte buffer of `'x'`                 |
+| `/16mb`     | GET    | 16777216-byte buffer of `'x'`                |
+| `/upload`   | POST   | echoes the byte count of the request body    |
+
+## Pinned dependencies
 
 ```toml
 [dependencies]
-quinn      = "0.10"   # pin major.minor
-h3         = "0.0.4"  # pin major.minor.patch
-h3-quinn   = "0.0.5"
-rustls     = "0.21"
-tokio      = { version = "1", features = ["full"] }
-bytes      = "1"
+quinn          = "0.11"
+h3             = "0.0.6"
+h3-quinn       = "0.0.7"
+rustls         = "0.23"
+rustls-pemfile = "2"
+rcgen          = "0.13"
 ```
 
-Cross-validate: bench against `quiche-client` from the
-`benchmark/baselines/quiche/` baseline as a second reference;
-publish both columns in the result table so any flare-side
-regression is bracketed by two independent implementations.
+Cargo.lock pins the exact patch revisions so bench numbers are
+reproducible across machines.
+
+## TLS
+
+The server generates a self-signed Ed25519 certificate at
+startup via `rcgen`; the bench client must skip cert
+verification. Every cross-framework HTTP/3 baseline runs this
+way -- `quiche-server`, `neqo-server`, `msquic_demo` all
+generate ephemeral certs -- so cert management stays out of
+the bench loop and the QUIC + h3 throughput measurement
+remains isolated.
+
+## Cross-validation
+
+The bench harness (`benchmark/scripts/bench_h3.sh`, Track Q7-W
+commit 3/4) runs the same `h2load --npn-list=h3` workload
+against flare, this quinn baseline, and the matching
+`benchmark/baselines/quiche/` baseline. Each baseline serves
+the same hello-world body; the harness computes the five-run
+median + p99 / p99.9 / p99.99 / sigma and writes the result
+table to `benchmark/results/v0.8/h3/`. The cross-framework
+table published in `docs/benchmark.md` (Track Q7-W commit 4/4)
+is the v0.8 hard-gate HTTP/3 throughput row.
