@@ -125,31 +125,25 @@ def test_goaway_rejects_new_streams() raises:
     assert_true(raised, "expected open after GOAWAY to raise")
 
 
-def test_feed_stream_chunk_raises_pending_wiring() raises:
-    """:meth:`feed_stream_chunk` raises with a clear message
-    pointing at the Track Q4 follow-up so callers using the
-    scaffold get a loud failure."""
+def test_feed_stream_chunk_allocates_stream_implicitly() raises:
+    """:meth:`feed_stream_chunk` allocates the per-stream
+    carrier on first chunk so the QUIC reactor doesn't have to
+    pre-announce the open-stream signal."""
     var c = H3Connection()
-    c.open_request_stream(0)
     var chunk = List[UInt8]()
-    chunk.append(UInt8(0x01))
-    var raised = False
-    try:
-        c.feed_stream_chunk(0, chunk)
-    except:
-        raised = True
-    assert_true(raised, "expected feed_stream_chunk to raise")
+    c.feed_stream_chunk(0, chunk^)
+    assert_true(c.has_stream(0))
 
 
-def test_take_response_frames_raises_pending_wiring() raises:
+def test_take_response_frames_empty_when_no_emit() raises:
+    """:meth:`take_response_frames` returns an empty buffer for
+    a stream that hasn't had :meth:`emit_response` called yet
+    (the reactor calls this repeatedly until it returns
+    empty)."""
     var c = H3Connection()
     c.open_request_stream(0)
-    var raised = False
-    try:
-        var _ = c.take_response_frames(0)
-    except:
-        raised = True
-    assert_true(raised, "expected take_response_frames to raise")
+    var drained = c.take_response_frames(0)
+    assert_equal(len(drained), 0)
 
 
 def main() raises:
@@ -162,6 +156,6 @@ def main() raises:
     test_close_request_stream_releases()
     test_close_request_stream_unknown_id_is_noop()
     test_goaway_rejects_new_streams()
-    test_feed_stream_chunk_raises_pending_wiring()
-    test_take_response_frames_raises_pending_wiring()
+    test_feed_stream_chunk_allocates_stream_implicitly()
+    test_take_response_frames_empty_when_no_emit()
     print("test_h3_server_scaffold: 11 passed")
