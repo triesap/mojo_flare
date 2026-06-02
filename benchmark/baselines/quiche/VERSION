@@ -1,0 +1,5 @@
+target = quiche-h3
+quiche = 0.22.0
+mio = 0.8
+rcgen = 0.13
+ring = 0.17

@@ -115,6 +115,7 @@ bench-vs-baseline         = "bash benchmark/scripts/bench_vs_baseline.sh"
 bench-vs-baseline-quick   = "bash benchmark/scripts/bench_vs_baseline.sh --only=flare,go_nethttp --configs=throughput"
 bench-h3                  = "bash benchmark/scripts/bench_h3.sh"  # Phase D Track Q7 HARD GATE -- exits with banner until h3 wiring lands
 bench-build-quinn-h3      = "cargo build --release --locked --manifest-path benchmark/baselines/quinn/Cargo.toml"  # Track Q7-W commit 1/4 -- quinn HTTP/3 baseline
+bench-build-quiche-h3     = "cargo build --release --locked --manifest-path benchmark/baselines/quiche/Cargo.toml" # Track Q7-W commit 2/4 -- quiche HTTP/3 baseline
 bench-integrity-only      = "bash benchmark/scripts/_integrity_check.sh"
 bench-collect-env         = "bash benchmark/scripts/_collect_env.sh"
 

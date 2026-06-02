@@ -1,0 +1,24 @@
+[package]
+name = "flare_bench_quiche_h3"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "server"
+path = "src/main.rs"
+
+# Pinned to the same major.minor revision the v0.8 plan calls
+# out. Cargo.lock pins the exact patch revisions so the bench
+# numbers are reproducible across EPYC 7R32 dev-box rebuilds.
+[dependencies]
+quiche = { version = "0.22", default-features = false, features = ["boringssl-vendored"] }
+mio    = { version = "0.8", features = ["net", "os-poll"] }
+ring   = "0.17"
+rcgen  = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 1
+panic         = "abort"
