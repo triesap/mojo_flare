@@ -99,6 +99,13 @@ ASAN_TESTS=(
   "tests/quic/test_hp_mask_ffi.mojo"              # raw FFI thunks
   "tests/quic/test_openssl_quic_crypto.mojo"      # Mojo trait surface
   "tests/quic/test_rfc9001_appendix_a.mojo"       # full RFC vectors
+  # Track Q2-W rustls QUIC FFI smoke (Cargo cdylib over rustls::quic).
+  # The Mojo binding routes every OwnedDLHandle.get_function call
+  # through a `read lib` borrow helper (same pattern as the OpenSSL
+  # FFI surfaces above) so ASan validates the .so stays mapped
+  # across the call and the Rust-side panic = "abort" profile
+  # leaves no unwind tables for ASan to trip over.
+  "tests/tls/test_rustls_quic_crate_smoke.mojo"   # libflare_rustls_quic.so dlopen + abi_version + empty-PEM rejection
 )
 TSAN_TESTS=(
   # Multicore + reactor (the only places we spawn pthreads)

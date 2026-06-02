@@ -5,6 +5,11 @@
 # bench harness runs `cargo build --release --locked` to reproduce
 # the exact dep graph the published numbers were measured against.
 !benchmark/baselines/*/Cargo.lock
+# Cargo.lock for the rustls QUIC FFI cdylib is exception-tracked too:
+# the activation script (Track Q2-W commit 2/4) and the
+# `build-rustls-quic` pixi task both pass `--locked` to cargo so the
+# .so the QUIC server reactor links against is reproducibly built.
+!flare/tls/ffi/rustls_wrapper/Cargo.lock
 
 # Mojo build artifacts
 __pycache__/

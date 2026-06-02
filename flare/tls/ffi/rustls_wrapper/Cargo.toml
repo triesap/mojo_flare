@@ -1,0 +1,39 @@
+[package]
+name = "flare_rustls_quic"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "C ABI shim around rustls::quic for the flare QUIC server reactor"
+publish = false
+
+# cdylib: produces libflare_rustls_quic.so / .dylib that Mojo's
+# OwnedDLHandle dlopens (mirrors the libflare_tls.so / libflare_brotli.so /
+# libflare_fs.so layout the rest of the FFI surfaces already use).
+[lib]
+name = "flare_rustls_quic"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# rustls 0.23 is the smallest API surface that exposes
+# rustls::quic::ServerConnection with QUIC v1 keys / secrets. The
+# "ring" provider is used so we don't pull in aws-lc-rs (which
+# would add a 5MB C dependency); ring is enough for the TLS-handshake
+# side of QUIC (the QUIC AEAD itself runs through OpenSslQuicCrypto
+# on the flare side -- see flare/quic/crypto.mojo).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+# Pinned: panics over the FFI boundary are UB. Catch every panic at
+# the C ABI surface, convert to a -1 return + thread-local error
+# message via the std::panic::catch_unwind path.
+once_cell = "1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = false
+strip = "symbols"
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
