@@ -217,28 +217,28 @@ own dispatch loop.
 | h1.1 client connection pool: `HttpClient.with_pool(...)` keyed on `(scheme, host, port)`, idle reuse + per-origin caps + stale-conn retry | [`client_pool.mojo`](../examples/advanced/client_pool.mojo), `flare.http.client_pool` |
 | h2c via Upgrade (client side — `Upgrade` + `HTTP2-Settings` + 101 carry-forward) | [`h2c_client.mojo`](../examples/advanced/h2c_client.mojo), [`tests/http/test_h2c_client_upgrade.mojo`](../tests/http/test_h2c_client_upgrade.mojo) |
 
-## HTTP/3 + QUIC codec primitives
+## HTTP/3 + QUIC
 
-Sans-I/O codec primitives for QUIC v1 (RFC 9000) and HTTP/3
-(RFC 9114). The codecs, the pure state machines, and the
-typed reactor + driver scaffolds ship; the wire I/O paths
-(the OpenSSL AEAD backend behind `QuicCrypto`, the rustls
-binding behind `RustlsQuicAcceptor`, the QUIC reactor UDP
-read loop, and the per-stream H3 dispatch) are flagged as
-"raises pending wiring" in the structs themselves so callers
-get a loud immediate failure rather than a silent no-op.
+End-to-end QUIC v1 (RFC 9000) + HTTP/3 (RFC 9114) server: the
+sans-I/O codecs, the pure state machines, the OpenSSL AEAD
+backend behind `QuicCrypto`, the rustls binding behind
+`RustlsQuicAcceptor`, the QUIC UDP reactor, the per-stream H3
+dispatch, and the ALPN router on top of `HttpServer.bind` are
+all wired. The same `Handler` instance reaches h1 + h2c + h2 +
+h3 simultaneously.
 
 The codec layer is byte-clean and covered by `fuzz-quic-varint`,
 `fuzz-quic-long-header`, `fuzz-quic-frame-decode`,
-`fuzz-quic-transport-params`, `fuzz-h3-frame`, and
-`fuzz-qpack-decode` (200 K runs each, zero crashes); see the
+`fuzz-quic-transport-params`, `fuzz-h3-frame`,
+`fuzz-qpack-decode`, `fuzz-quic-packet-decrypt`,
+`fuzz-quic-initial-handshake`, `fuzz-quic-connection-id`, and
+`fuzz-h3-server` (200 K runs each, zero crashes); see the
 [fuzz coverage table](#testing-and-fuzz-coverage). The codec
 demo at [`quic_codec_demo.mojo`](../examples/advanced/quic_codec_demo.mojo)
 exercises varint, frame codec, transport parameters, state
 machine, and congestion controller round-trips end-to-end. The
-scaffold demo at [`http3_server_scaffold.mojo`](../examples/advanced/http3_server_scaffold.mojo)
-walks the `H3Connection` driver through its lifecycle (open /
-close / GOAWAY / deferred dispatch).
+runnable server example at [`http3_server.mojo`](../examples/advanced/http3_server.mojo)
+serves a single `Handler` over h1 + h2 + h3 simultaneously.
 
 | Surface | Where |
 |---|---|
@@ -250,11 +250,11 @@ close / GOAWAY / deferred dispatch).
 | QUIC connection + stream state machines (RFC 9000 §3, §10, §13): `Connection`, `Stream`, `ConnectionEvents`, `handle_frame`, `mark_handshake_complete`, `is_idle_timeout_expired`, `connection_close`, `new_connection`, `new_stream`, `empty_events`; `CONN_STATE_*` and `STREAM_STATE_*` enums | `flare.quic.state` |
 | QUIC congestion control (RFC 9438 CUBIC + RFC 9406 HyStart++ + RFC 9002 §7.7 pacing) as pure functions over a `CcState` value: `cc_init`, `on_packet_sent`, `on_ack_received`, `on_packets_lost`, `on_round_start`, `pacing_budget`, `pacing_rate_bytes_per_second`, `can_send` | `flare.quic.cc` |
 | QUIC congestion controller trait (RFC 9438 CUBIC default + RFC 9002 Appendix B Reno fallback): `CongestionController` trait, `CubicController`, `RenoController`, `CcChoice` carrier. Picks deterministic Reno for tests and CUBIC for production via a single config field | `flare.quic.cc` |
-| QUIC initial-secret + AEAD key schedule (RFC 9001 §5 + RFC 5869 HKDF): `hkdf_extract`, `hkdf_expand`, `hkdf_expand_label`, `derive_initial_secrets`, `QuicAead` enum, `QuicCrypto` trait, `StubQuicCrypto`. The OpenSSL AEAD backend behind the trait is the focused follow-up commit; the key schedule is RFC 9001 Appendix A.1 byte-exact and pinned by `tests/quic/test_crypto.mojo` | `flare.quic.crypto` |
-| QUIC server reactor scaffold: `QuicServerConfig`, `QuicListener`, `QuicConnection`, `ConnectionIdTable` (RFC 9000 §5 -- multiple connection IDs per peer). The UDP read loop + per-datagram dispatch is the Track Q3 wiring follow-up; the carrier shapes are pinned | `flare.quic.server` |
-| HTTP/3 server driver scaffold: `H3Connection` (per-connection driver mounted on `Handler`), `H3ConnectionConfig` (SETTINGS carrier -- max field section size, QPACK table caps, CONNECT-Protocol toggle, GOAWAY soft cap), `H3StreamType` (RFC 9114 §6.2 codepoints). Per-stream feed + take raise pending Track Q4 wiring | `flare.h3.server` |
+| QUIC initial-secret + AEAD key schedule (RFC 9001 §5 + RFC 5869 HKDF): `hkdf_extract`, `hkdf_expand`, `hkdf_expand_label`, `derive_initial_secrets`, `QuicAead` enum, `QuicCrypto` trait, `OpenSslQuicCrypto`. OpenSSL AEAD backend (AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305) + AES-ECB / ChaCha20 header-protection mask per RFC 9001 §5.3 / §5.4; key schedule is RFC 9001 Appendix A.1 byte-exact, AEAD vectors are RFC 9001 Appendix A byte-exact, both pinned by `tests/quic/test_crypto.mojo` + `tests/quic/test_openssl_quic_crypto.mojo` + `tests/quic/test_rfc9001_appendix_a.mojo`; fuzz-covered (`fuzz-quic-packet-decrypt`) | `flare.quic.crypto` |
+| QUIC server reactor: `QuicServerConfig`, `QuicListener`, `QuicConnection`, `ConnectionIdTable` (RFC 9000 §5 -- multiple connection IDs per peer). UDP bind + `recvmmsg` + `UDP_GRO` per-datagram dispatch, ECN echo per RFC 9002 §A.4, PTO + idle + ack-delay timers on the shared TimerWheel, CC + pacing driven from the egress path; fuzz-covered (`fuzz-quic-initial-handshake`, `fuzz-quic-connection-id`) | `flare.quic.server` |
+| HTTP/3 server driver: `H3Connection` (per-connection driver mounted on `Handler`), `H3ConnectionConfig` (SETTINGS carrier -- max field section size, QPACK table caps, CONNECT-Protocol toggle, GOAWAY soft cap), `H3StreamType` (RFC 9114 §6.2 codepoints). `feed_stream_chunk` drives `H3RequestReader` -> `Handler` -> response writer; `take_response_frames` drains encoded bytes; CONTROL + QPACK uni-stream dispatch consumes SETTINGS / GOAWAY / MAX_PUSH_ID; fuzz-covered (`fuzz-h3-server`) | `flare.h3.server` |
 | ALPN -> wire-protocol dispatcher: `WireProtocol` codepoints (UNKNOWN / HTTP_1_1 / H2C / HTTP_2 / HTTP_3), `ALPN_HTTP_1_1` / `ALPN_HTTP_2` / `ALPN_HTTP_3` identifiers, `dispatch_alpn`, `dispatch_h2c_upgrade`, `negotiate_alpn`, `wire_protocol_name`. The pure decision function the reactor consults after a TLS handshake completes | `flare.http.alpn_dispatch` |
-| rustls QUIC binding scaffold: `RustlsQuicConfig`, `RustlsQuicAcceptor`, `RustlsQuicSession`, `RustlsQuicError`, `QuicEncryptionLevel`. The Rust crate behind the binding is the Track Q2 wiring follow-up; the FFI surface is pinned | `flare.tls.rustls_quic` |
+| rustls QUIC binding: `RustlsQuicConfig`, `RustlsQuicAcceptor`, `RustlsQuicSession`, `RustlsQuicError`, `QuicEncryptionLevel`. C ABI shim over `rustls::quic::ServerConnection` (rustls 0.23); per-level CRYPTO frames feed / drain through `flare_rustls_quic_feed_crypto` / `_take_crypto`, negotiated ALPN via `flare_rustls_quic_alpn` | `flare.tls.rustls_quic` |
 | HTTP/3 frame codec (RFC 9114 §7): `H3Frame`, `H3FrameType`, `encode_h3_frame`, `decode_h3_frame`; frame-type constants `H3_FRAME_TYPE_{DATA,HEADERS,CANCEL_PUSH,SETTINGS,PUSH_PROMISE,GOAWAY,MAX_PUSH_ID}` | `flare.h3.frame` |
 | HTTP/3 SETTINGS payload (RFC 9114 §7.2.4): `H3Setting`, `encode_h3_settings`, `decode_h3_settings`; standard identifiers `H3_SETTINGS_{QPACK_MAX_TABLE_CAPACITY,MAX_FIELD_SECTION_SIZE,QPACK_BLOCKED_STREAMS,ENABLE_CONNECT_PROTOCOL}` | `flare.h3.frame` |
 | HTTP/3 request-stream state machine (RFC 9114 §4 + §7): `H3RequestReader`, `H3RequestEventHandler`, `feed_into[H]`; fires `on_headers` / `on_data` / `on_trailers` / `on_unknown_frame` / `on_protocol_error` callbacks on a caller-supplied handler, returns the byte count consumed (`0` == NEEDS_MORE), and tracks the INIT / BODY / TRAILERS / DONE phases via the `H3_REQUEST_STATE_*` tags | `flare.h3.request_reader` |
@@ -494,4 +494,8 @@ Per-harness breakdown (input → fuzzer):
 | QUIC transport-parameter codec (RFC 9000 §18 — typed-value stability across encode / decode / re-encode) | `fuzz-quic-transport-params` |
 | HTTP/3 frame codec (multi-byte varint frame types) | `fuzz-h3-frame` |
 | QPACK static-only decoder + round-trip (RFC 9204 — header stability across encode / decode) | `fuzz-qpack-decode` |
+| QUIC packet AEAD (decrypt → re-encrypt round-trip; RFC 9001 §5) | `fuzz-quic-packet-decrypt` |
+| QUIC Initial handshake parser (RFC 9000 §17.2.2 long header + CRYPTO frame extraction) | `fuzz-quic-initial-handshake` |
+| QUIC Connection ID dispatch (`ConnectionIdTable.lookup` on arbitrary bytes) | `fuzz-quic-connection-id` |
+| HTTP/3 server end-to-end (request stream feed → handler → response writer) | `fuzz-h3-server` |
 | Cache-Control header parser (idempotent re-parse) | `fuzz-cache-control-parser` |
