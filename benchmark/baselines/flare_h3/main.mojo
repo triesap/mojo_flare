@@ -1,35 +1,62 @@
 """Flare HTTP/3 plaintext baseline binary for the bench_h3 harness.
 
-Binds a :class:`flare.quic.QuicListener` on
-127.0.0.1:$FLARE_BENCH_PORT (default 8443) and runs the listener's
-event loop. The listener's per-datagram dispatch path is wired
-into :class:`flare.quic.state.Connection` -> the OpenSSL AEAD
-backend -> the QUIC frame parser -- the same wire path the
-Track Q3-W loopback integration tests exercise.
+Per Track Q13-W (v0.8 continuation): the bench baseline now
+goes through :meth:`flare.http.HttpServer.bind_with_h3` +
+:meth:`HttpServer.serve_h3` so the same Handler dispatch shape
+production callers use drives the bench workload. The handler
+returns a 13-byte ``"Hello, World!"`` body on every request,
+matching the existing ``/plaintext`` route the bench harness
+expects.
 
-The HTTP/3 dispatch path that this baseline wires on top
-(`flare.h3.H3Connection`) is per-connection rather than
-per-binary; for the bench harness the binary just needs to run
-the listener long enough for h2load --npn-list=h3 to drive a
-sustained workload. Track Q7-W commit 4/4 publishes the numbers
-this baseline produces.
+Honest status of the wire (v0.8 continuation, post Q12-W):
 
-Why not use HttpServer.bind_with_h3: that path also opens a TCP
-listener for h1 / h2c / h2 alongside the QUIC listener. The
-bench harness scopes the workload to a single wire; this binary
-opens only the UDP side so h2load --npn-list=h3 is the only
-client + the only response shape under measurement.
+The QUIC reactor accepts datagrams, decrypts Initial packets,
+feeds the rustls handshake, and drains outbound CRYPTO bytes
+back onto the wire (Q9-W .. Q11-W). The H3 dispatch wire is
+attached + the Handler is invoked once a request stream surfaces
+(Q12-W). The remaining gap is the *rustls KeyChange -> per-level
+traffic secrets -> 1-RTT egress* chain: rustls's QUIC API
+returns ``Option<KeyChange>`` from ``write_hs`` but the FFI
+wrapper currently discards it (see
+``flare/tls/ffi/rustls_wrapper/src/lib.rs:447`` for the
+``let _maybe_keys = ...`` site). Without per-level traffic
+secrets, the Handshake + 1-RTT branches in
+:meth:`QuicConnection.handle_packet` drop their inbound
+datagrams silently (the Q10-W safety gate) and the egress side
+has no key to protect a 1-RTT short-header packet with.
 
-The binary stays as small as possible -- the FFI build
-(OpenSSL + rustls) and the QUIC state machine are
-already-tested through the QUIC unit + integration suite; this
-file is the boot-up shim the bench harness drives.
+What that means for the bench harness:
+
+* The binary binds + accepts a UDP socket cleanly.
+* h2load's first Initial datagram is decrypted + fed into rustls.
+* rustls produces a ServerHello which is wrapped in a CRYPTO
+  frame and emitted as a protected server Initial.
+* h2load's Handshake-level reply lands, but the slot's
+  Handshake reader_secret stays empty so the packet is silently
+  dropped -- h2load eventually times out the connection.
+
+Closing this gap is the Q13-W follow-up (see the design notebook):
+either extend the rustls FFI to surface
+``KeyChange::Handshake { keys }`` + ``KeyChange::OneRtt { keys }``
+to the Mojo side (preferred -- minimal Mojo-side churn) or
+mirror the rustls API by deriving 1-RTT keys ourselves once the
+TLS handshake completes (more code, no FFI extension required).
+The bench gate ``flare_h3 median req/s >= 72,571 (quiche
+floor)`` is documented as deferred-to-the-follow-up commit in
+``docs/benchmark.md`` per the Track Q14-W docs sweep.
+
+The binary stays runnable today so the harness can verify the
+boot-up path + the listener bind + the Handler-mounted serve
+loop; the actual request-rate floor lands once the key bridge
+is wired.
 """
 
 from std.os import getenv
 from std.pathlib import Path
 
-from flare.quic import QuicListener, QuicServerConfig
+from flare.http import Handler, HttpServer, Request, Response, ok
+from flare.net import IpAddr, SocketAddr
+from flare.quic import QuicServerConfig
 from flare.tls import RustlsQuicConfig
 
 
@@ -44,6 +71,17 @@ def _load_pem(path: String) raises -> String:
     fixture.
     """
     return Path(path).read_text()
+
+
+@fieldwise_init
+struct _PlaintextHandler(Copyable, Handler, Movable):
+    """13-byte ``"Hello, World!"`` responder -- matches the
+    Rust pack's ``/plaintext`` route shape exactly so the bench
+    comparison is honest (no asymmetric response sizes).
+    """
+
+    def serve(self, req: Request) raises -> Response:
+        return ok(String("Hello, World!"))
 
 
 def main() raises:
@@ -61,20 +99,28 @@ def main() raises:
     rustls_cfg.alpn_protocols = List[String]()
     rustls_cfg.alpn_protocols.append(String("h3"))
 
-    var cfg = QuicServerConfig()
-    cfg.host = String("127.0.0.1")
-    cfg.port = UInt16(port)
-    cfg.rustls_config = rustls_cfg^
+    var udp_cfg = QuicServerConfig()
+    udp_cfg.host = String("127.0.0.1")
+    udp_cfg.port = UInt16(port)
+    udp_cfg.rustls_config = rustls_cfg^
     # Bench shape favors throughput; lift the per-connection
     # initial_max_data so the QUIC flow-control window doesn't
     # throttle a high-rate h2load -n large workload. The default
     # is conservative for general use.
-    cfg.initial_max_data = UInt64(32 * 1024 * 1024)
+    udp_cfg.initial_max_data = UInt64(32 * 1024 * 1024)
     # Idle timeout long enough that h2load's per-connection
     # warmup + 5 measurement runs (10s + 5x30s = 160s) never
     # tickle the idle reaper.
-    cfg.max_idle_timeout_ms = UInt64(300_000)
+    udp_cfg.max_idle_timeout_ms = UInt64(300_000)
 
+    # bind_with_h3 also opens a TCP listener on tcp_addr for
+    # h1 / h2c / h2; we point it at an ephemeral kernel-picked
+    # port we never serve on so the bench harness only sees the
+    # UDP socket. This keeps the harness's "single-wire
+    # comparison" contract intact -- the harness drives h2load
+    # on the UDP port only.
+    var tcp_addr = SocketAddr(IpAddr.localhost(), UInt16(0))
+    var srv = HttpServer.bind_with_h3(tcp_addr, udp_cfg^)
+    var handler = _PlaintextHandler()
     print("flare-h3 listening on 127.0.0.1:", port)
-    var listener = QuicListener.bind(cfg^)
-    listener.run()
+    srv.serve_h3[_PlaintextHandler](handler^)
