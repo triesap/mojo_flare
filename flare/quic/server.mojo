@@ -51,7 +51,8 @@ References:
 """
 
 from std.collections import Dict, List, Optional
-from std.memory import Span
+from std.ffi import c_int, external_call
+from std.memory import Span, stack_allocation
 
 from ..net.address import IpAddr, SocketAddr
 from ..udp import UdpSocket
@@ -65,19 +66,24 @@ from .cc import (
     pacing_budget,
 )
 from .crypto import QuicAead
+from .frame import CryptoFrame, encode_crypto
 from .packet import (
     ConnectionId,
     LongHeader,
     MAX_CID_LENGTH,
     PACKET_TYPE_INITIAL,
+    QUIC_VERSION_1,
+    encode_long_header,
     parse_long_header,
     parse_short_header,
 )
 from .protection import (
+    protect_initial_packet,
     unprotect_1rtt_packet,
     unprotect_handshake_packet,
     unprotect_initial_packet,
 )
+from .varint import encode_varint
 from .state import (
     Connection,
     ConnectionEvents,
@@ -107,6 +113,32 @@ from ..tls._rustls_quic_ffi import (
     _do_session_free,
     _do_take_crypto,
 )
+
+
+# -- Monotonic clock helper --------------------------------------------
+
+
+def _monotonic_ms() -> UInt64:
+    """Return the monotonic clock in milliseconds.
+
+    Uses ``clock_gettime(CLOCK_MONOTONIC, ...)``. The constant value
+    1 for ``CLOCK_MONOTONIC`` is portable between Linux and macOS
+    (macOS has supported it since 10.12). Same shape as
+    :func:`flare.http._reactor.keepalive_scan._monotonic_ms` but
+    returns ``UInt64`` so it composes with :class:`TimerWheel`
+    without an extra cast.
+    """
+    var buf = stack_allocation[16, UInt8]()
+    for i in range(16):
+        (buf + i).init_pointee_copy(UInt8(0))
+    _ = external_call["clock_gettime", c_int](c_int(1), buf.bitcast[NoneType]())
+    var sec: Int64 = 0
+    var nsec: Int64 = 0
+    for i in range(8):
+        sec |= Int64(Int((buf + i).load())) << Int64(8 * i)
+    for i in range(8):
+        nsec |= Int64(Int((buf + 8 + i).load())) << Int64(8 * i)
+    return UInt64(Int(sec) * 1000 + Int(nsec) // 1_000_000)
 
 
 # -- Per-slot rustls QUIC session carrier ------------------------------
@@ -336,6 +368,30 @@ struct QuicConnection(Copyable, Movable):
     """Outbound 1-RTT traffic secret. Populated alongside
     :attr:`rx_1rtt_secret`."""
 
+    var tx_initial_pn: UInt64
+    """Next packet number to use on the outbound Initial path.
+    Monotonic per RFC 9001 §5.3; incremented after every
+    successful Initial send. The Q11-W reactor reads + bumps
+    this when draining :attr:`QuicListener.tls_egress_queues`
+    onto the wire."""
+
+    var tx_initial_offset: UInt64
+    """Cumulative offset of CRYPTO bytes the server has emitted
+    at the Initial encryption level. Per RFC 9000 §19.6 each
+    CRYPTO frame carries its starting offset; this counter
+    advances by the byte length of every emitted CRYPTO frame
+    so the peer can reassemble the TLS stream in order."""
+
+    var tx_handshake_pn: UInt64
+    """Next packet number to use on the outbound Handshake
+    path. Reserved for Q12-W's reactor drain expansion."""
+
+    var tx_handshake_offset: UInt64
+    """Cumulative CRYPTO offset at the Handshake level."""
+
+    var tx_1rtt_pn: UInt64
+    """Next packet number to use on the outbound 1-RTT path."""
+
     def __init__(
         out self,
         local_cid: ConnectionId,
@@ -358,6 +414,11 @@ struct QuicConnection(Copyable, Movable):
         self.tx_handshake_secret = List[UInt8]()
         self.rx_1rtt_secret = List[UInt8]()
         self.tx_1rtt_secret = List[UInt8]()
+        self.tx_initial_pn = UInt64(0)
+        self.tx_initial_offset = UInt64(0)
+        self.tx_handshake_pn = UInt64(0)
+        self.tx_handshake_offset = UInt64(0)
+        self.tx_1rtt_pn = UInt64(0)
 
     def install_handshake_keys(
         mut self,
@@ -759,12 +820,19 @@ struct QuicListener(Movable):
     var tls_egress_queues: List[List[UInt8]]
     """Per-slot outbound CRYPTO byte queue. Q9-W lands the
     drain side: each successful :meth:`feed_crypto` is followed
-    by :meth:`take_crypto` and the resulting bytes append here
-    so the Q11-W protect + sendto path has a stable queue to
-    drain when the reactor's egress half lands. Today's reactor
-    short-circuits on the receive half (no sendto yet); the
-    queue is observable from tests so Q9-W can attest the
-    bridge dispatched."""
+    by :meth:`take_crypto` and the resulting bytes append here.
+    Track Q11-W drains this queue inside :meth:`_drain_and_send`
+    -- the bytes are wrapped in a QUIC CRYPTO frame, packaged
+    inside an Initial-level packet, AEAD-protected with
+    :func:`protect_initial_packet`, and emitted via
+    :meth:`send_to`. Cleared after every successful drain.
+    """
+    var peer_addrs: List[SocketAddr]
+    """Per-slot peer UDP address. Parallel slab to
+    :attr:`connections` -- captured in :meth:`_accept_initial`
+    from the inbound datagram's sender. The Q11-W reactor's
+    egress path reads this to call :meth:`send_to(slot, ...)`
+    without re-parsing the inbound datagram."""
     var timer_wheel: TimerWheel
     """Per-listener :class:`flare.runtime.timer_wheel.TimerWheel`
     driving PTO / idle / ack-delay timeouts (Track Q3-W commit
@@ -794,6 +862,7 @@ struct QuicListener(Movable):
         self.tls_acceptor = tls_acceptor^
         self.tls_sessions = List[_SessionSlot]()
         self.tls_egress_queues = List[List[UInt8]]()
+        self.peer_addrs = List[SocketAddr]()
         self.timer_wheel = TimerWheel(now_ms=UInt64(0))
         self._socket = sock^
         self._local_addr = addr
@@ -996,7 +1065,7 @@ struct QuicListener(Movable):
         if slot >= 0:
             return slot
         if lh.packet_type == PACKET_TYPE_INITIAL:
-            return self._accept_initial(lh)
+            return self._accept_initial(lh, peer)
         return -1
 
     def _dispatch_short(
@@ -1011,7 +1080,9 @@ struct QuicListener(Movable):
         var dcid_hex = cid_to_hex(sh.dcid)
         return self.cid_table.lookup(dcid_hex)
 
-    def _accept_initial(mut self, lh: LongHeader) raises -> Int:
+    def _accept_initial(
+        mut self, lh: LongHeader, peer: SocketAddr
+    ) raises -> Int:
         """Allocate a new connection slot for an Initial packet
         with an unknown DCID.
 
@@ -1023,8 +1094,10 @@ struct QuicListener(Movable):
         per-packet wiring in commit 2/5 of this track.
 
         Also materializes the per-slot rustls QUIC session
-        (Track Q9-W) and the empty CRYPTO egress queue, and
-        arms the per-connection idle timeout.
+        (Track Q9-W), the empty CRYPTO egress queue, the peer
+        UDP address (Track Q11-W -- so the egress drain can
+        :meth:`send_to` without re-parsing), and arms the
+        per-connection idle timeout.
         """
         var local_cid = lh.dcid.copy()
         var peer_cid = lh.scid.copy()
@@ -1039,6 +1112,7 @@ struct QuicListener(Movable):
         self.connections.append(qc^)
         self.tls_sessions.append(self._new_session_slot())
         self.tls_egress_queues.append(List[UInt8]())
+        self.peer_addrs.append(peer)
         self.cid_table.register(cid_to_hex(local_cid), slot)
         _ = self.schedule_idle_timeout(slot)
         return slot
@@ -1066,17 +1140,27 @@ struct QuicListener(Movable):
         return _SessionSlot(handle=handle, level=QuicEncryptionLevel.INITIAL)
 
     def tick(mut self, timeout_ms: Int = 100) raises -> Bool:
-        """Drain at most one inbound datagram.
+        """Drain at most one inbound datagram and pump egress.
+
+        Reactor I/O loop step per Track Q11-W:
+
+        1. ``recv_from`` -- pull one datagram off the socket (or
+           time out cleanly after ``timeout_ms``).
+        2. ``dispatch_datagram`` -- route by DCID; the matched
+           slot's :meth:`QuicConnection.handle_packet` advances
+           the sans-I/O state machine and surfaces inbound
+           CRYPTO frames; the bridge feeds them to rustls and
+           drains outbound CRYPTO bytes into
+           :attr:`tls_egress_queues`.
+        3. ``drain_all_egress`` -- every slot with pending bytes
+           gets a server Initial packet protected via
+           :func:`protect_initial_packet` and emitted through
+           :meth:`send_to`.
 
         Returns ``True`` if a datagram was received + dispatched,
-        ``False`` if ``recv_from`` timed out before any datagram
-        arrived. Callers use this when they need to multiplex
-        the QUIC event loop with other work (tests + the
-        ALPN-dispatching HTTP server).
-
-        ``timeout_ms`` is applied via ``SO_RCVTIMEO``; the
-        default 100 ms is the same shutdown-poll cadence
-        :meth:`run` uses.
+        ``False`` if ``recv_from`` timed out. ``timeout_ms`` is
+        applied via ``SO_RCVTIMEO``; the default 100 ms is the
+        same shutdown-poll cadence :meth:`run` uses.
         """
         self._socket.set_recv_timeout(timeout_ms)
         var buf = List[UInt8]()
@@ -1090,28 +1174,203 @@ struct QuicListener(Movable):
         except e:
             # ``UdpSocket.recv_from`` raises :class:`Timeout` for
             # both ``EAGAIN`` and ``EWOULDBLOCK``; the dispatch
-            # loop treats both as "no datagram this tick".
+            # loop treats both as "no datagram this tick" but
+            # still drains pending egress so an already-handshaking
+            # session can flush its ServerHello fragments.
             var msg = String(e)
             if msg.startswith("Timeout") or msg.startswith("recvfrom"):
+                _ = self.drain_all_egress()
                 return False
             raise e^
         if got <= 0:
+            _ = self.drain_all_egress()
             return False
-        _ = self.dispatch_datagram(Span[UInt8, _](buf[:got]), sender)
+        var slot = self.dispatch_datagram(Span[UInt8, _](buf[:got]), sender)
+        if slot >= 0:
+            _ = self._drain_and_send(slot)
         return True
+
+    def send_to(self, datagram: Span[UInt8, _], addr: SocketAddr) raises -> Int:
+        """Emit a single fully-protected QUIC datagram on the
+        listener's UDP socket. Thin wrapper over
+        :meth:`flare.udp.socket.UdpSocket.send_to` so the
+        egress path has the same surface the unit tests stub.
+        Returns the byte count actually written (UDP either
+        sends the whole datagram or raises)."""
+        return self._socket.send_to(datagram, addr)
+
+    def drain_all_egress(mut self) raises -> Int:
+        """Drain every slot's :attr:`tls_egress_queues` onto the
+        wire. Returns the number of datagrams emitted.
+
+        Called from the reactor between recv ticks (and on the
+        ``recv_from`` timeout path) so a slot with pending
+        outbound CRYPTO bytes can flush even if no inbound
+        datagram arrived. Pure no-op if no slot has pending
+        bytes.
+        """
+        var emitted = 0
+        for slot in range(len(self.connections)):
+            if self._drain_and_send(slot):
+                emitted += 1
+        return emitted
+
+    def _drain_and_send(mut self, slot: Int) raises -> Bool:
+        """Drain ``tls_egress_queues[slot]`` into a single
+        server-side Initial datagram and emit it.
+
+        Returns ``True`` if a datagram was actually sent.
+        Returns ``False`` (no-op) when:
+
+        * The slot is out of range.
+        * The egress queue is empty (nothing to flush).
+        * The connection is no longer ``alive`` (closed slots
+          stop sending).
+
+        The path is:
+
+        1. Build a QUIC CRYPTO frame (``offset =
+           tx_initial_offset``) wrapping the queued TLS bytes
+           per RFC 9000 §19.6.
+        2. Build the Initial-level long-header prefix --
+           ``encode_long_header`` (DCID = peer's SCID, SCID =
+           server's local CID, type-specific bits encode
+           pn_length-1) + zero-length token varint + payload-
+           length varint.
+        3. ``protect_initial_packet`` -- AEAD-seal the CRYPTO
+           frame with the unprotected header as AAD and the
+           server-side Initial secret derived from the
+           connection's ``local_cid`` (RFC 9001 §5.2).
+        4. ``send_to(peer_addr)`` -- single-datagram emit per
+           Q11-W; recvmmsg + sendmmsg batching is the Q13-W
+           perf-pass follow-up.
+        5. Advance ``tx_initial_offset`` by the CRYPTO frame
+           length and ``tx_initial_pn`` by one so the next
+           drain produces a fresh pn + offset pair.
+
+        Errors during build/protect short-circuit to ``False``
+        without raising; the silent-drop discipline mirrors the
+        inbound side (RFC 9001 §5.2). Once the Handshake +
+        1-RTT branches are wired (Q11-W follow-up commit), this
+        method will switch encryption level based on the slot's
+        rustls KeyChange state.
+        """
+        if slot < 0 or slot >= len(self.connections):
+            return False
+        if slot >= len(self.tls_egress_queues):
+            return False
+        if slot >= len(self.peer_addrs):
+            return False
+        if len(self.tls_egress_queues[slot]) == 0:
+            return False
+        if not self.connections[slot].alive:
+            return False
+        var datagram = self._build_initial_response(slot)
+        if len(datagram) == 0:
+            return False
+        var peer = self.peer_addrs[slot]
+        _ = self.send_to(Span[UInt8, _](datagram), peer)
+        # Successful emit -- clear the queue. Retransmission is
+        # the rustls session's responsibility (RFC 9001 §5.3 +
+        # rustls QUIC API: rustls only emits each chunk once and
+        # relies on the QUIC layer to retransmit; that's a Q11-W
+        # follow-up commit, gated on PTO timer wiring).
+        self.tls_egress_queues[slot] = List[UInt8]()
+        return True
+
+    def _build_initial_response(
+        mut self, slot: Int, pn_length: Int = 2
+    ) raises -> List[UInt8]:
+        """Materialize a server-side Initial packet that carries
+        the slot's pending egress CRYPTO bytes.
+
+        Splits cleanly from :meth:`_drain_and_send` so unit tests
+        can exercise the wire-format builder without binding a
+        UDP socket. Returns the protected datagram bytes ready
+        for :meth:`send_to`.
+
+        ``pn_length`` defaults to 2 which is the comfortable
+        ServerHello / EncryptedExtensions size for any
+        reasonable cert chain (covers 0..65535 packet numbers
+        per RFC 9001 §5.3). The caller may raise this to 3 / 4
+        once long-running connections cross the 2-byte pn
+        window.
+        """
+        var qbytes = self.tls_egress_queues[slot].copy()
+        var conn = self.connections[slot].copy()
+        var crypto = CryptoFrame(
+            offset=conn.tx_initial_offset, data=qbytes.copy()
+        )
+        var payload = List[UInt8]()
+        encode_crypto(crypto, payload)
+        # Build the long-header prefix: server DCID = peer's
+        # client-chosen SCID; server SCID = local_cid (same the
+        # peer sent in its first Initial's DCID). RFC 9000
+        # §17.2.2: the Initial Source Connection ID is the
+        # server's chosen CID -- here we echo local_cid so the
+        # client's CID->slot routing stays stable (per-Initial
+        # SCID rotation is a v0.9+ follow-up).
+        var first_bits = (pn_length - 1) & 0x3
+        var prefix = encode_long_header(
+            PACKET_TYPE_INITIAL,
+            QUIC_VERSION_1,
+            conn.peer_cid,
+            conn.local_cid,
+            type_specific_bits=first_bits,
+        )
+        # Token-length varint (always 0 for server-side Initial
+        # responses per RFC 9000 §17.2.2 -- only the client may
+        # echo a NEW_TOKEN-issued token).
+        var token_len_var = encode_varint(UInt64(0))
+        for i in range(len(token_len_var)):
+            prefix.append(token_len_var[i])
+        # Payload length: CRYPTO frame body + pn_length + 16-byte
+        # AEAD tag per RFC 9000 §17.2.5.
+        var payload_total = UInt64(len(payload) + pn_length + 16)
+        var len_var = encode_varint(payload_total)
+        for i in range(len(len_var)):
+            prefix.append(len_var[i])
+        var pn = conn.tx_initial_pn
+        var datagram = protect_initial_packet(
+            Span[UInt8, _](prefix),
+            packet_number=pn,
+            pn_length=pn_length,
+            plaintext=Span[UInt8, _](payload),
+            dcid=conn.local_cid,
+            is_server=True,
+        )
+        # Advance the connection's outbound Initial-level
+        # counters so the next drain emits a fresh pn + offset.
+        conn.tx_initial_pn = pn + UInt64(1)
+        conn.tx_initial_offset = conn.tx_initial_offset + UInt64(len(qbytes))
+        self.connections[slot] = conn^
+        return datagram^
 
     def run(mut self) raises:
         """Run the listener's event loop. Blocks until
         :meth:`shutdown` flips the stop flag.
 
-        Each iteration drains one datagram (or times out after
-        100 ms so the stop flag is observed promptly). The
-        per-packet decrypt + state-machine dispatch wiring lands
-        with commit 2/5 of this track; this commit ships the
-        UDP bind + the dispatcher + the routing table.
+        Per Track Q11-W the loop now drives the full I/O cycle
+        ``recv -> dispatch -> drain -> protect -> sendto ->
+        advance_timers``:
+
+        1. ``tick(100)`` blocks up to 100 ms in ``recv_from``;
+           on a datagram it runs the dispatch + handle + drain
+           chain.
+        2. On a 100 ms timeout it still calls
+           :meth:`drain_all_egress` so any session that started
+           handshaking can flush its first response.
+        3. :meth:`advance_timers` then runs the wheel against
+           the current monotonic clock so PTO + idle + ack-delay
+           callbacks fire on time.
+
+        The 100 ms recv timeout caps the worst-case timer slop
+        and the shutdown-flag polling interval.
         """
         while not self._stopping:
             _ = self.tick(timeout_ms=100)
+            var now_ms = _monotonic_ms()
+            _ = self.advance_timers(now_ms)
 
     def shutdown(mut self):
         """Request the event loop to exit. Idempotent; safe to
