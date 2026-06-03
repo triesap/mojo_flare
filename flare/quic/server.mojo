@@ -73,7 +73,11 @@ from .packet import (
     parse_long_header,
     parse_short_header,
 )
-from .protection import unprotect_initial_packet
+from .protection import (
+    unprotect_1rtt_packet,
+    unprotect_handshake_packet,
+    unprotect_initial_packet,
+)
 from .state import (
     Connection,
     ConnectionEvents,
@@ -309,6 +313,29 @@ struct QuicConnection(Copyable, Movable):
     ``last_send_us`` to get the elapsed delta the pure
     :func:`flare.quic.cc.pacing_budget` function consumes."""
 
+    var rx_handshake_secret: List[UInt8]
+    """Inbound Handshake-level traffic secret (RFC 9001 §5.1).
+    On a server this is the client_handshake_traffic_secret.
+    The Q11-W reactor populates this from rustls's ``KeyChange``
+    when the TLS state machine advances past Initial. Empty
+    until set: Handshake packets that arrive while the slot is
+    empty drop silently (the peer will retransmit)."""
+
+    var tx_handshake_secret: List[UInt8]
+    """Outbound Handshake-level traffic secret. On a server
+    this is the server_handshake_traffic_secret. Populated by
+    Q11-W in lockstep with :attr:`rx_handshake_secret`. Used by
+    :func:`protect_handshake_packet` on the send side."""
+
+    var rx_1rtt_secret: List[UInt8]
+    """Inbound 1-RTT (application) traffic secret. Populated by
+    the Q11-W reactor once rustls reports handshake-complete.
+    Empty until then; short-header packets dropped silently."""
+
+    var tx_1rtt_secret: List[UInt8]
+    """Outbound 1-RTT traffic secret. Populated alongside
+    :attr:`rx_1rtt_secret`."""
+
     def __init__(
         out self,
         local_cid: ConnectionId,
@@ -327,6 +354,40 @@ struct QuicConnection(Copyable, Movable):
         self.ack_delay_timer_id = UInt64(0)
         self.cc_state = cc_init()
         self.last_send_us = UInt64(0)
+        self.rx_handshake_secret = List[UInt8]()
+        self.tx_handshake_secret = List[UInt8]()
+        self.rx_1rtt_secret = List[UInt8]()
+        self.tx_1rtt_secret = List[UInt8]()
+
+    def install_handshake_keys(
+        mut self,
+        var rx_secret: List[UInt8],
+        var tx_secret: List[UInt8],
+    ):
+        """Install per-direction Handshake traffic secrets.
+        Called by the Q11-W reactor when the rustls session
+        emits its first ``KeyChange::Handshake`` after the
+        Initial-level CRYPTO exchange completes (RFC 9001
+        §5.1). After this, Handshake packets at this connection
+        decrypt cleanly through
+        :func:`unprotect_handshake_packet`.
+        """
+        self.rx_handshake_secret = rx_secret^
+        self.tx_handshake_secret = tx_secret^
+
+    def install_1rtt_keys(
+        mut self,
+        var rx_secret: List[UInt8],
+        var tx_secret: List[UInt8],
+    ):
+        """Install per-direction 1-RTT (application) traffic
+        secrets. Called by the Q11-W reactor on rustls's
+        ``KeyChange::OneRtt`` -- the handshake-complete moment.
+        Short-header packets arriving after this decrypt
+        through :func:`unprotect_1rtt_packet`.
+        """
+        self.rx_1rtt_secret = rx_secret^
+        self.tx_1rtt_secret = tx_secret^
 
     def on_idle_expired(mut self):
         """RFC 9000 §10.1.2 -- silent close on idle timeout.
@@ -418,22 +479,31 @@ struct QuicConnection(Copyable, Movable):
         """Drive one inbound datagram through the per-packet
         decrypt + frame dispatch pipeline.
 
-        Long-header Initial packets unprotect through
-        :func:`flare.quic.protection.unprotect_initial_packet`
-        with the server-side reader role and the connection's
-        ``local_cid`` (which equals the client-chosen DCID at the
-        handshake-accept moment). Decrypted frame bytes feed
+        Dispatch by encryption level:
+
+        - Long-header Initial: always handled -- the secret is
+          derived from the connection's ``local_cid`` (RFC 9001
+          §5.2). This is the first-flight path.
+        - Long-header Handshake: handled iff
+          :attr:`rx_handshake_secret` is non-empty. The Q11-W
+          reactor installs the secret from rustls's
+          ``KeyChange::Handshake`` callback as soon as the
+          Initial-level CRYPTO exchange completes.
+        - Short-header 1-RTT: handled iff :attr:`rx_1rtt_secret`
+          is non-empty. The Q11-W reactor installs that on
+          rustls's ``KeyChange::OneRtt`` (handshake-complete).
+        - Long-header 0-RTT + Retry: deferred to Q11-W+ (the
+          first because flare doesn't accept 0-RTT yet, the
+          second because Retry is server-emit-only and never
+          arrives at this server's handle_packet path).
+
+        For each handled level the decrypted frame bytes feed
         :func:`flare.quic.state.handle_frame_buf`, which advances
         the sans-I/O state machine and reports back through
-        :class:`flare.quic.state.ConnectionEvents`.
-
-        Long-header Handshake + 0-RTT packets and short-header
-        1-RTT packets require keys derived from the TLS handshake;
-        those land with commits 3/5-5/5 of this track once the
-        rustls bridge surfaces per-encryption-level secrets. For
-        now they return empty :class:`ConnectionEvents` so the
-        dispatch loop doesn't crash on legitimate post-handshake
-        traffic.
+        :class:`flare.quic.state.ConnectionEvents`. Packets at a
+        level whose secret is not yet installed are dropped
+        silently (the peer's PTO-driven retransmission will
+        re-deliver once the secret arrives).
         """
         var events = empty_events()
         if len(datagram) < 1:
@@ -441,19 +511,110 @@ struct QuicConnection(Copyable, Movable):
         var first = Int(datagram[0])
         var is_long = (first & 0x80) != 0
         if not is_long:
-            return events^
+            return self._handle_1rtt_packet(datagram, now_us, aead_choice)
         var lh: LongHeader
         try:
             lh = parse_long_header(datagram)
         except:
             return events^
-        if lh.packet_type != PACKET_TYPE_INITIAL:
-            return events^
+        if lh.packet_type == PACKET_TYPE_INITIAL:
+            return self._handle_initial_packet(datagram, now_us, aead_choice)
+        if lh.packet_type == PACKET_TYPE_HANDSHAKE:
+            return self._handle_handshake_packet(datagram, now_us, aead_choice)
+        # 0-RTT (1) and Retry (3) are not handled here -- see
+        # docstring.
+        return events^
+
+    def _handle_initial_packet(
+        mut self,
+        datagram: Span[UInt8, _],
+        now_us: UInt64,
+        aead_choice: Int,
+    ) raises -> ConnectionEvents:
+        """Per-level Initial decrypt + frame dispatch. Carved out
+        of :meth:`handle_packet` so the H + 1-RTT branches stay
+        readable; behaviour is byte-identical to the v0.8 close-
+        wire-paths version."""
+        var events = empty_events()
         var up = unprotect_initial_packet(
             datagram,
             self.local_cid,
             is_server=True,
             largest_received_pn=self.conn.largest_received_packet,
+            aead_choice=aead_choice,
+        )
+        var cursor = 0
+        var payload = Span[UInt8, _](up.payload)
+        while cursor < len(payload):
+            var consumed = handle_frame_buf(
+                self.conn, payload[cursor:], now_us, events
+            )
+            if consumed <= 0:
+                break
+            cursor += consumed
+        if up.packet_number > self.conn.largest_received_packet:
+            self.conn.largest_received_packet = up.packet_number
+        return events^
+
+    def _handle_handshake_packet(
+        mut self,
+        datagram: Span[UInt8, _],
+        now_us: UInt64,
+        aead_choice: Int,
+    ) raises -> ConnectionEvents:
+        """Per-level Handshake decrypt + frame dispatch.
+
+        Requires :attr:`rx_handshake_secret` to be installed by
+        the Q11-W reactor's ``KeyChange::Handshake`` plumb-in.
+        Until then this returns empty events so the loop doesn't
+        crash on legitimate post-Initial traffic.
+        """
+        var events = empty_events()
+        if len(self.rx_handshake_secret) == 0:
+            return events^
+        var up = unprotect_handshake_packet(
+            datagram,
+            Span[UInt8, _](self.rx_handshake_secret),
+            self.conn.largest_received_packet,
+            aead_choice=aead_choice,
+        )
+        var cursor = 0
+        var payload = Span[UInt8, _](up.payload)
+        while cursor < len(payload):
+            var consumed = handle_frame_buf(
+                self.conn, payload[cursor:], now_us, events
+            )
+            if consumed <= 0:
+                break
+            cursor += consumed
+        if up.packet_number > self.conn.largest_received_packet:
+            self.conn.largest_received_packet = up.packet_number
+        return events^
+
+    def _handle_1rtt_packet(
+        mut self,
+        datagram: Span[UInt8, _],
+        now_us: UInt64,
+        aead_choice: Int,
+    ) raises -> ConnectionEvents:
+        """Per-level 1-RTT decrypt + frame dispatch.
+
+        Requires :attr:`rx_1rtt_secret` to be installed by the
+        Q11-W reactor's ``KeyChange::OneRtt`` plumb-in. The
+        ``dcid_length`` arg to :func:`unprotect_1rtt_packet`
+        comes from the connection's pinned ``local_cid`` length
+        -- the short header carries the DCID raw but not its
+        length (RFC 9000 §17.3), so the receiver supplies it
+        from per-connection state.
+        """
+        var events = empty_events()
+        if len(self.rx_1rtt_secret) == 0:
+            return events^
+        var up = unprotect_1rtt_packet(
+            datagram,
+            Span[UInt8, _](self.rx_1rtt_secret),
+            self.conn.largest_received_packet,
+            self.local_cid.length(),
             aead_choice=aead_choice,
         )
         var cursor = 0

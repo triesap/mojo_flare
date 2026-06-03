@@ -1,5 +1,7 @@
 """Fuzz harness: ``OpenSslQuicCrypto.decrypt`` over random
-ciphertext + AAD + packet-number inputs.
+ciphertext + AAD + packet-number inputs, plus the Track Q10-W
+``unprotect_handshake_packet`` and ``unprotect_1rtt_packet``
+entry points over random datagrams.
 
 This is the safety harness for the QUIC AEAD-open path.  The
 prod hot path will feed the carrier arbitrary bytes from the
@@ -11,14 +13,20 @@ network, so the AEAD open primitive MUST:
    raise a regular ``Error``.
 3. Specifically *raise* (not crash) when ciphertext is shorter
    than the 16-byte AEAD tag.
+4. Reject malformed long-header / short-header bytes cleanly
+   (header-parse + HP-mask paths in protection.mojo).
 
 The harness builds inputs by partitioning the fuzz bytes into
 ``(aead_choice, packet_number, aad, ct)`` and runs decrypt under
 all three AEADs (AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305).
-The carrier's keys are fixed across runs so the AEAD failure
-path is the dominant code path the fuzzer explores; the round-
-trip property (encrypt -> decrypt yields the plaintext) is
-covered by the unit tests against RFC 9001 Appendix A vectors.
+After the AEAD round it feeds the same bytes through
+``unprotect_handshake_packet`` and ``unprotect_1rtt_packet`` so
+the new Q10-W header-parse + HP-mask paths see the same fuzz
+breadth (200K runs total). The carrier's keys are fixed across
+runs so the AEAD failure path is the dominant code path the
+fuzzer explores; the round-trip property (encrypt -> decrypt
+yields the plaintext) is covered by the unit tests against RFC
+9001 Appendix A vectors.
 
 Run:
     pixi run --environment fuzz fuzz-quic-packet-decrypt
@@ -31,6 +39,10 @@ from flare.quic.crypto import (
     OpenSslQuicCrypto,
     PacketKeys,
     QuicAead,
+)
+from flare.quic.protection import (
+    unprotect_1rtt_packet,
+    unprotect_handshake_packet,
 )
 
 
@@ -112,6 +124,55 @@ def target(data: List[UInt8]) raises:
             _ = crypto.header_protection_mask(Span[UInt8, _](sample))
         except _:
             pass
+
+    # Track Q10-W: drive the new Handshake + 1-RTT unprotect
+    # entry points with the same fuzz datagram. The carriers use
+    # the same fixed PacketKeys schedule so the AEAD-tag-failure
+    # path dominates; the prior interesting bug class
+    # (out-of-bounds in the HP-sample window or in the truncated-
+    # pn pointer) is exactly what these two extra calls
+    # rediscover on every run with random first bytes.
+    var fuzz_secret = List[UInt8]()
+    for i in range(32):
+        fuzz_secret.append(UInt8(0x80 + (i % 16)))
+    var aead = QuicAead.AES_128_GCM
+    if aead_choice == 1:
+        aead = QuicAead.AES_256_GCM
+    elif aead_choice == 2:
+        aead = QuicAead.CHACHA20_POLY1305
+    # Try Handshake (long header) unprotect.
+    try:
+        _ = unprotect_handshake_packet(
+            Span[UInt8, _](data),
+            Span[UInt8, _](fuzz_secret),
+            UInt64(0),
+            aead,
+        )
+    except _:
+        pass
+    # Try 1-RTT (short header) unprotect for two pinned DCID
+    # lengths the reactor cares about: 0 (the RFC A.5 shape) and
+    # 8 (the default flare server local-CID length).
+    try:
+        _ = unprotect_1rtt_packet(
+            Span[UInt8, _](data),
+            Span[UInt8, _](fuzz_secret),
+            UInt64(0),
+            0,
+            aead,
+        )
+    except _:
+        pass
+    try:
+        _ = unprotect_1rtt_packet(
+            Span[UInt8, _](data),
+            Span[UInt8, _](fuzz_secret),
+            UInt64(0),
+            8,
+            aead,
+        )
+    except _:
+        pass
 
 
 def main() raises:

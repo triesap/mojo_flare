@@ -21,14 +21,25 @@ server reactor (Track Q3-W) wires per datagram:
   packet-number bytes + the low header bits, return the wire
   bytes ready for ``sendto``.
 
-Only the Initial-packet variants land in this commit (Track Q3-W
-commit 2/5); Handshake + 1-RTT use the same primitive but with
-keys negotiated by the TLS handshake (commit 4/5 of Track Q3-W
-once the rustls bridge surfaces keying material).
+Track Q10-W extends the Initial pair with the post-Initial
+encryption levels:
+
+* :func:`unprotect_handshake_packet` / :func:`protect_handshake_packet`
+  -- long-header packets at the Handshake encryption level (RFC
+  9000 §17.2.4). Same AEAD + HP shape as Initial but no token
+  field in the long-header extras, and the per-direction secret
+  is supplied by the caller (the rustls QUIC bridge surfaces it
+  through Track Q9-W's session slab).
+* :func:`unprotect_1rtt_packet` / :func:`protect_1rtt_packet` --
+  short-header packets at the 1-RTT encryption level (RFC 9000
+  §17.3). Short-header parsing instead of long-header; ``key_phase``
+  is exposed for key-update tracking but applying a new key is
+  outside this commit's scope.
 
 References:
 - RFC 9001 §5.3 "AEAD Usage".
 - RFC 9001 §5.4 "Header Protection".
+- RFC 9000 §17.2 "Long Header Packets" + §17.3 "Short Header Packets".
 - RFC 9000 §A.3 "Sample Packet Number Decoding Algorithm".
 - aioquic ``aioquic.quic.crypto.CryptoPair`` / ``packet_protection``.
 """
@@ -44,10 +55,15 @@ from .crypto import (
 from .packet import (
     ConnectionId,
     LongHeader,
+    MAX_CID_LENGTH,
+    PACKET_TYPE_HANDSHAKE,
     PACKET_TYPE_INITIAL,
+    ShortHeader,
     parse_initial_extras,
     parse_long_header,
+    parse_short_header,
 )
+from .varint import decode_varint
 
 
 # -- Unprotected-packet carrier ----------------------------------------
@@ -254,6 +270,282 @@ def protect_initial_packet(
         sample.append(protected[sample_offset + i])
     var mask = crypto.header_protection_mask(Span[UInt8, _](sample))
     protected[0] = UInt8(Int(protected[0]) ^ (Int(mask[0]) & 0x0F))
+    for i in range(pn_length):
+        protected[pn_offset + i] = UInt8(
+            Int(protected[pn_offset + i]) ^ Int(mask[1 + i])
+        )
+    return protected^
+
+
+# -- Handshake-packet unprotect (Track Q10-W) --------------------------
+
+
+def unprotect_handshake_packet(
+    datagram: Span[UInt8, _],
+    reader_secret: Span[UInt8, _],
+    largest_received_pn: UInt64,
+    aead_choice: Int = QuicAead.AES_128_GCM,
+) raises -> UnprotectedPacket:
+    """Strip header protection + AEAD-decrypt a Handshake packet.
+
+    Identical RFC 9001 §5.3-§5.4 shape as
+    :func:`unprotect_initial_packet`, but:
+
+    * The long-header extras carry only a payload-length varint
+      (RFC 9000 §17.2.4 -- no token field, unlike Initial).
+    * The per-direction secret comes from the TLS handshake (the
+      rustls KeyChange the Q9-W bridge surfaces) rather than the
+      DCID-derived Initial secret.
+
+    ``reader_secret`` is the 32-byte (HKDF-SHA-256) handshake
+    traffic secret for the *peer's* direction: on a server reading
+    a client Handshake packet this is the client_handshake_secret.
+    """
+    if len(datagram) < 1:
+        raise Error("unprotect_handshake: empty datagram")
+    var lh: LongHeader = parse_long_header(datagram)
+    if lh.packet_type != PACKET_TYPE_HANDSHAKE:
+        raise Error(
+            "unprotect_handshake: packet_type "
+            + String(lh.packet_type)
+            + " is not Handshake"
+        )
+    var len_var = decode_varint(datagram[lh.payload_offset :])
+    var pn_offset = lh.payload_offset + len_var.consumed
+    var packet_end = pn_offset + Int(len_var.value)
+    if packet_end > len(datagram):
+        raise Error(
+            "unprotect_handshake: payload-length "
+            + String(len_var.value)
+            + " exceeds datagram size "
+            + String(len(datagram))
+        )
+    var sample_offset = pn_offset + 4
+    if sample_offset + 16 > len(datagram):
+        raise Error("unprotect_handshake: HP sample window exceeds datagram")
+    var crypto = OpenSslQuicCrypto.from_secret(reader_secret, aead_choice)
+    var mask = crypto.header_protection_mask(
+        datagram[sample_offset : sample_offset + 16]
+    )
+    var unprotected_first = UInt8(Int(datagram[0]) ^ (Int(mask[0]) & 0x0F))
+    var pn_length = (Int(unprotected_first) & 0x03) + 1
+    if pn_offset + pn_length > len(datagram):
+        raise Error("unprotect_handshake: packet-number bytes exceed datagram")
+    var truncated_pn = UInt64(0)
+    var header = List[UInt8]()
+    header.append(unprotected_first)
+    for i in range(1, pn_offset):
+        header.append(datagram[i])
+    for i in range(pn_length):
+        var b = UInt8(Int(datagram[pn_offset + i]) ^ Int(mask[1 + i]))
+        header.append(b)
+        truncated_pn = (truncated_pn << 8) | UInt64(b)
+    var packet_number = decode_packet_number(
+        truncated_pn, pn_length, largest_received_pn
+    )
+    var ciphertext_start = pn_offset + pn_length
+    var ciphertext = datagram[ciphertext_start:packet_end]
+    var plaintext = crypto.decrypt(
+        ciphertext, Span[UInt8, _](header), packet_number
+    )
+    return UnprotectedPacket(
+        header=header^,
+        payload=plaintext^,
+        packet_number=packet_number,
+        pn_length=pn_length,
+    )
+
+
+# -- Handshake-packet protect (egress) ---------------------------------
+
+
+def protect_handshake_packet(
+    unprotected_header_prefix: Span[UInt8, _],
+    packet_number: UInt64,
+    pn_length: Int,
+    plaintext: Span[UInt8, _],
+    writer_secret: Span[UInt8, _],
+    aead_choice: Int = QuicAead.AES_128_GCM,
+) raises -> List[UInt8]:
+    """Build a fully protected Handshake packet ready for ``sendto``.
+
+    ``unprotected_header_prefix`` is the long-header bytes from
+    the first byte through the payload-length varint -- i.e. the
+    output of :func:`flare.quic.packet.encode_long_header` plus
+    the encoded payload-length (no token field for Handshake per
+    RFC 9000 §17.2.4). The function appends the packet-number
+    bytes, AEAD-encrypts the plaintext with the unprotected
+    header as AAD, then applies header protection.
+
+    ``writer_secret`` is the local-side handshake traffic secret
+    (server_handshake_secret on the server send path); the rustls
+    KeyChange surfaces it through Q9-W's session slab.
+    """
+    if pn_length < 1 or pn_length > 4:
+        raise Error(
+            "protect_handshake: pn_length out of [1, 4]: " + String(pn_length)
+        )
+    var crypto = OpenSslQuicCrypto.from_secret(writer_secret, aead_choice)
+    var unprotected_header = List[UInt8]()
+    for i in range(len(unprotected_header_prefix)):
+        unprotected_header.append(unprotected_header_prefix[i])
+    for i in range(pn_length):
+        var shift = (pn_length - 1 - i) * 8
+        unprotected_header.append(UInt8((Int(packet_number) >> shift) & 0xFF))
+    var ciphertext = crypto.encrypt(
+        plaintext, Span[UInt8, _](unprotected_header), packet_number
+    )
+    var protected = List[UInt8]()
+    for i in range(len(unprotected_header)):
+        protected.append(unprotected_header[i])
+    for i in range(len(ciphertext)):
+        protected.append(ciphertext[i])
+    var pn_offset = len(unprotected_header) - pn_length
+    var sample_offset = pn_offset + 4
+    if sample_offset + 16 > len(protected):
+        raise Error("protect_handshake: ciphertext too short for HP sample")
+    var sample = List[UInt8]()
+    for i in range(16):
+        sample.append(protected[sample_offset + i])
+    var mask = crypto.header_protection_mask(Span[UInt8, _](sample))
+    protected[0] = UInt8(Int(protected[0]) ^ (Int(mask[0]) & 0x0F))
+    for i in range(pn_length):
+        protected[pn_offset + i] = UInt8(
+            Int(protected[pn_offset + i]) ^ Int(mask[1 + i])
+        )
+    return protected^
+
+
+# -- 1-RTT packet unprotect (short header) -----------------------------
+
+
+def unprotect_1rtt_packet(
+    datagram: Span[UInt8, _],
+    reader_secret: Span[UInt8, _],
+    largest_received_pn: UInt64,
+    dcid_length: Int,
+    aead_choice: Int = QuicAead.AES_128_GCM,
+) raises -> UnprotectedPacket:
+    """Strip header protection + AEAD-decrypt a 1-RTT (short
+    header) packet.
+
+    ``dcid_length`` is the connection's pinned local CID length
+    (the short header does not encode the DCID length on the
+    wire, per RFC 9000 §17.3). ``reader_secret`` is the peer's
+    application traffic secret (client_application_traffic_secret
+    on the server read path).
+
+    The HP sample is taken at the four-byte offset after the
+    packet number per RFC 9001 §5.4.2; that requires the
+    ciphertext to span at least pn_offset + 4 + 16 bytes. The
+    first byte's bits 0-4 (reserved + key-phase + pn_length) are
+    cleared by header protection.
+    """
+    if dcid_length < 0 or dcid_length > MAX_CID_LENGTH:
+        raise Error(
+            "unprotect_1rtt: dcid_length "
+            + String(dcid_length)
+            + " out of [0, 20]"
+        )
+    if len(datagram) < 1:
+        raise Error("unprotect_1rtt: empty datagram")
+    if (Int(datagram[0]) & 0x80) != 0:
+        raise Error(
+            "unprotect_1rtt: long-header bit set, expected short header"
+        )
+    var sh: ShortHeader = parse_short_header(datagram, dcid_length)
+    var pn_offset = sh.payload_offset
+    var sample_offset = pn_offset + 4
+    if sample_offset + 16 > len(datagram):
+        raise Error("unprotect_1rtt: HP sample window exceeds datagram")
+    var crypto = OpenSslQuicCrypto.from_secret(reader_secret, aead_choice)
+    var mask = crypto.header_protection_mask(
+        datagram[sample_offset : sample_offset + 16]
+    )
+    # Short header has 5 protected bits (reserved 4-3 + key phase 2
+    # + pn length 1-0) per RFC 9001 §5.4.1 versus the long header's
+    # 4 bits; the mask's low 5 bits XOR the first byte.
+    var unprotected_first = UInt8(Int(datagram[0]) ^ (Int(mask[0]) & 0x1F))
+    var pn_length = (Int(unprotected_first) & 0x03) + 1
+    if pn_offset + pn_length > len(datagram):
+        raise Error("unprotect_1rtt: packet-number bytes exceed datagram")
+    var truncated_pn = UInt64(0)
+    var header = List[UInt8]()
+    header.append(unprotected_first)
+    for i in range(1, pn_offset):
+        header.append(datagram[i])
+    for i in range(pn_length):
+        var b = UInt8(Int(datagram[pn_offset + i]) ^ Int(mask[1 + i]))
+        header.append(b)
+        truncated_pn = (truncated_pn << 8) | UInt64(b)
+    var packet_number = decode_packet_number(
+        truncated_pn, pn_length, largest_received_pn
+    )
+    var ciphertext_start = pn_offset + pn_length
+    var ciphertext = datagram[ciphertext_start:]
+    var plaintext = crypto.decrypt(
+        ciphertext, Span[UInt8, _](header), packet_number
+    )
+    return UnprotectedPacket(
+        header=header^,
+        payload=plaintext^,
+        packet_number=packet_number,
+        pn_length=pn_length,
+    )
+
+
+# -- 1-RTT packet protect (egress) -------------------------------------
+
+
+def protect_1rtt_packet(
+    short_header_prefix: Span[UInt8, _],
+    packet_number: UInt64,
+    pn_length: Int,
+    plaintext: Span[UInt8, _],
+    writer_secret: Span[UInt8, _],
+    aead_choice: Int = QuicAead.AES_128_GCM,
+) raises -> List[UInt8]:
+    """Build a fully protected 1-RTT packet ready for ``sendto``.
+
+    ``short_header_prefix`` is the unprotected short-header bytes
+    from the first byte through the DCID (i.e. the output of
+    :func:`flare.quic.packet.encode_short_header`). The function
+    appends the packet-number bytes, AEAD-encrypts the plaintext
+    with the unprotected short header as AAD, then applies header
+    protection.
+
+    Header protection masks five bits of the first byte per
+    RFC 9001 §5.4.1 (reserved 4-3 + key-phase 2 + pn-length 1-0),
+    versus the long header's four bits.
+    """
+    if pn_length < 1 or pn_length > 4:
+        raise Error(
+            "protect_1rtt: pn_length out of [1, 4]: " + String(pn_length)
+        )
+    var crypto = OpenSslQuicCrypto.from_secret(writer_secret, aead_choice)
+    var unprotected_header = List[UInt8]()
+    for i in range(len(short_header_prefix)):
+        unprotected_header.append(short_header_prefix[i])
+    for i in range(pn_length):
+        var shift = (pn_length - 1 - i) * 8
+        unprotected_header.append(UInt8((Int(packet_number) >> shift) & 0xFF))
+    var ciphertext = crypto.encrypt(
+        plaintext, Span[UInt8, _](unprotected_header), packet_number
+    )
+    var protected = List[UInt8]()
+    for i in range(len(unprotected_header)):
+        protected.append(unprotected_header[i])
+    for i in range(len(ciphertext)):
+        protected.append(ciphertext[i])
+    var pn_offset = len(unprotected_header) - pn_length
+    var sample_offset = pn_offset + 4
+    if sample_offset + 16 > len(protected):
+        raise Error("protect_1rtt: ciphertext too short for HP sample")
+    var sample = List[UInt8]()
+    for i in range(16):
+        sample.append(protected[sample_offset + i])
+    var mask = crypto.header_protection_mask(Span[UInt8, _](sample))
+    protected[0] = UInt8(Int(protected[0]) ^ (Int(mask[0]) & 0x1F))
     for i in range(pn_length):
         protected[pn_offset + i] = UInt8(
             Int(protected[pn_offset + i]) ^ Int(mask[1 + i])

@@ -26,12 +26,25 @@ Vectors covered:
 - A.3 server initial: AEAD seal of the 134-byte ACK+CRYPTO
   plaintext under (server_key, server_iv, pn=1) with the
   unprotected long header as AAD; output matches the RFC.
+- A.5 ChaCha20-Poly1305 short header: full
+  :func:`protect_1rtt_packet` round-trip against the RFC's
+  ``4cfe4189655e5cd55c41f69080575d7999c25a5bfb`` reference packet
+  (Track Q10-W). Pins both the AEAD output and the header
+  protection mask width for short headers.
+
+Track Q10-W also adds Handshake + 1-RTT round-trip cases for
+:func:`protect_handshake_packet` / :func:`unprotect_handshake_packet`
+and :func:`protect_1rtt_packet` / :func:`unprotect_1rtt_packet`.
+Those use synthetic 32-byte secrets (the schedule downstream of
+``derive_packet_keys`` is identical to the Initial path; only
+the secret origin differs, which TLS supplies in production).
 
 Header protection masks (A.2 and A.5 vectors) are already
 covered byte-for-byte by ``test_hp_mask_ffi.mojo``; this file
 focuses on the AEAD round-trip side of the schedule.
 """
 
+from std.collections import List
 from std.memory import Span
 from std.testing import assert_equal
 
@@ -41,6 +54,19 @@ from flare.quic.crypto import (
     derive_initial_secrets,
     derive_packet_keys,
 )
+from flare.quic.packet import (
+    ConnectionId,
+    PACKET_TYPE_HANDSHAKE,
+    encode_long_header,
+    encode_short_header,
+)
+from flare.quic.protection import (
+    protect_1rtt_packet,
+    protect_handshake_packet,
+    unprotect_1rtt_packet,
+    unprotect_handshake_packet,
+)
+from flare.quic.varint import encode_varint
 
 
 def _hex(s: String) -> List[UInt8]:
@@ -271,6 +297,309 @@ def test_a2_client_initial_full_ciphertext_bytes() raises:
     _eq_bytes(got_last_16, rfc_last_16)
 
 
+# -- Track Q10-W: Handshake + 1-RTT round-trips ------------------------
+
+
+def _synth_secret() raises -> List[UInt8]:
+    """A 32-byte synthetic SHA-256-sized traffic secret.
+
+    The shape (32 bytes, AES-128-GCM-compatible) mirrors what
+    rustls surfaces through its ``KeyChange`` once the TLS
+    handshake completes; the exact bytes don't matter for the
+    round-trip property -- only that they feed
+    :func:`derive_packet_keys` the same way Initial secrets do.
+    """
+    return _hex(
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    )
+
+
+def test_handshake_round_trip_short_payload() raises:
+    """Track Q10-W: protect_handshake_packet round-trips through
+    unprotect_handshake_packet with a synthetic Handshake secret.
+
+    Builds a long-header Handshake prefix (no token, payload-
+    length varint), AEAD-encrypts a synthetic 32-byte CRYPTO
+    payload at pn=1 with pn_length=2, applies header protection,
+    then runs the inverse pipeline and asserts the plaintext +
+    packet number round-trip.
+    """
+    var secret = _synth_secret()
+    var dcid_bytes = _hex("c0ffee")
+    var scid_bytes = _hex("decafbad")
+    var dcid = ConnectionId(bytes=dcid_bytes^)
+    var scid = ConnectionId(bytes=scid_bytes^)
+    var pn = UInt64(1)
+    var pn_length = 2
+    var plaintext = _hex(
+        "060040320100002e030302030405060708"
+        "0a0b0c0d0e0f1011121314151617181920"
+        "2122232425262728292a"
+    )
+    var prefix = encode_long_header(
+        packet_type=PACKET_TYPE_HANDSHAKE,
+        version=UInt32(1),
+        dcid=dcid,
+        scid=scid,
+        type_specific_bits=(pn_length - 1),
+    )
+    # Handshake payload length is plaintext + pn_length + 16-byte
+    # AEAD tag, encoded as a QUIC varint per RFC 9000 §17.2.4.
+    var payload_length = UInt64(len(plaintext) + pn_length + 16)
+    var len_bytes = encode_varint(payload_length)
+    for i in range(len(len_bytes)):
+        prefix.append(len_bytes[i])
+    var packet = protect_handshake_packet(
+        Span[UInt8, _](prefix),
+        pn,
+        pn_length,
+        Span[UInt8, _](plaintext),
+        Span[UInt8, _](secret),
+        QuicAead.AES_128_GCM,
+    )
+    var got = unprotect_handshake_packet(
+        Span[UInt8, _](packet),
+        Span[UInt8, _](secret),
+        UInt64(0),
+        QuicAead.AES_128_GCM,
+    )
+    assert_equal(got.packet_number, pn)
+    assert_equal(got.pn_length, pn_length)
+    _eq_bytes(got.payload, plaintext)
+
+
+def test_handshake_round_trip_aes_256_gcm() raises:
+    """The AEAD choice flows through both protect + unprotect:
+    AES-256-GCM with the same synthetic secret + payload must
+    also round-trip, proving the choice is not hard-coded."""
+    var secret = _synth_secret()
+    var dcid = ConnectionId(bytes=_hex("a1b2c3d4"))
+    var scid = ConnectionId(bytes=_hex("e5f6a7b8"))
+    var pn = UInt64(7)
+    var pn_length = 1
+    var plaintext = _hex("06001a08c0d0e0f00102030405060708091011")
+    var prefix = encode_long_header(
+        packet_type=PACKET_TYPE_HANDSHAKE,
+        version=UInt32(1),
+        dcid=dcid,
+        scid=scid,
+        type_specific_bits=(pn_length - 1),
+    )
+    var payload_length = UInt64(len(plaintext) + pn_length + 16)
+    var len_bytes = encode_varint(payload_length)
+    for i in range(len(len_bytes)):
+        prefix.append(len_bytes[i])
+    var packet = protect_handshake_packet(
+        Span[UInt8, _](prefix),
+        pn,
+        pn_length,
+        Span[UInt8, _](plaintext),
+        Span[UInt8, _](secret),
+        QuicAead.AES_256_GCM,
+    )
+    var got = unprotect_handshake_packet(
+        Span[UInt8, _](packet),
+        Span[UInt8, _](secret),
+        UInt64(0),
+        QuicAead.AES_256_GCM,
+    )
+    assert_equal(got.packet_number, pn)
+    assert_equal(got.pn_length, pn_length)
+    _eq_bytes(got.payload, plaintext)
+
+
+def test_1rtt_round_trip_synthetic() raises:
+    """Track Q10-W: protect_1rtt_packet round-trips through
+    unprotect_1rtt_packet with a synthetic application secret.
+
+    Builds a short-header prefix (first byte + 4-byte DCID),
+    AEAD-encrypts a 13-byte ``Hello, World!`` body at pn=42 with
+    pn_length=2, applies short-header HP (5 bits masked), then
+    runs the inverse pipeline and asserts the plaintext + packet
+    number round-trip. The dcid_length argument is the pinned
+    local CID length the receiver knows out-of-band.
+    """
+    var secret = _synth_secret()
+    var dcid_bytes = _hex("c0ffeec0")
+    var dcid_length = len(dcid_bytes)
+    var dcid = ConnectionId(bytes=dcid_bytes^)
+    var pn = UInt64(42)
+    var pn_length = 2
+    var plaintext = _hex("48656c6c6f2c20576f726c6421")
+    var prefix = encode_short_header(
+        dcid=dcid,
+        spin_bit=False,
+        key_phase=False,
+        pn_length=pn_length,
+    )
+    var packet = protect_1rtt_packet(
+        Span[UInt8, _](prefix),
+        pn,
+        pn_length,
+        Span[UInt8, _](plaintext),
+        Span[UInt8, _](secret),
+        QuicAead.AES_128_GCM,
+    )
+    var got = unprotect_1rtt_packet(
+        Span[UInt8, _](packet),
+        Span[UInt8, _](secret),
+        UInt64(0),
+        dcid_length,
+        QuicAead.AES_128_GCM,
+    )
+    assert_equal(got.packet_number, pn)
+    assert_equal(got.pn_length, pn_length)
+    _eq_bytes(got.payload, plaintext)
+
+
+def test_1rtt_round_trip_empty_dcid_pn_length_3() raises:
+    """An empty DCID + 3-byte packet number (the shape of RFC
+    9001 A.5) must round-trip too. The short header has only
+    one byte of public prefix when the DCID is empty, so this
+    is the tightest exercise of the parser.
+    """
+    var secret = _synth_secret()
+    var dcid = ConnectionId(bytes=List[UInt8]())
+    var pn = UInt64(0xBFF4)
+    var pn_length = 3
+    var plaintext = _hex("01")
+    var prefix = encode_short_header(
+        dcid=dcid,
+        spin_bit=False,
+        key_phase=False,
+        pn_length=pn_length,
+    )
+    var packet = protect_1rtt_packet(
+        Span[UInt8, _](prefix),
+        pn,
+        pn_length,
+        Span[UInt8, _](plaintext),
+        Span[UInt8, _](secret),
+        QuicAead.AES_128_GCM,
+    )
+    var got = unprotect_1rtt_packet(
+        Span[UInt8, _](packet),
+        Span[UInt8, _](secret),
+        UInt64(0),
+        0,
+        QuicAead.AES_128_GCM,
+    )
+    assert_equal(got.packet_number, pn)
+    assert_equal(got.pn_length, pn_length)
+    _eq_bytes(got.payload, plaintext)
+
+
+def test_a5_chacha20_short_header_round_trip() raises:
+    """RFC 9001 Appendix A.5: ChaCha20-Poly1305 short-header
+    packet round-trip against the RFC's reference vector.
+
+    Reference packet (RFC 9001 A.5):
+      packet = 4cfe4189655e5cd55c41f69080575d7999c25a5bfb
+
+    Steps the RFC publishes:
+    - secret = 9ac312a7f877468ebe69422748ad00a1
+               5443f18203a07d6060f688f30f21632b
+    - pn = 654360564 (0x2700BFF4)
+    - unprotected header = 4200bff4 (1-byte first + 3-byte pn)
+    - payload plaintext = 01 (single PING frame)
+    - protected packet = 4cfe4189 655e5cd55c41f69080575d7999c25a5bfb
+
+    This test pins both the AEAD output (via the round-trip) and
+    the short-header HP mask width (5 bits, not 4 -- if the
+    width was wrong the first byte would not round-trip). The
+    canonical interop guarantee is that this protected packet
+    decrypts to plaintext ``0x01`` using the published secret.
+    """
+    var secret = _hex(
+        "9ac312a7f877468ebe69422748ad00a15443f18203a07d6060f688f30f21632b"
+    )
+    var pn = UInt64(654360564)
+    var pn_length = 3
+    var plaintext = _hex("01")
+    var prefix = encode_short_header(
+        dcid=ConnectionId(bytes=List[UInt8]()),
+        spin_bit=False,
+        key_phase=False,
+        pn_length=pn_length,
+    )
+    var packet = protect_1rtt_packet(
+        Span[UInt8, _](prefix),
+        pn,
+        pn_length,
+        Span[UInt8, _](plaintext),
+        Span[UInt8, _](secret),
+        QuicAead.CHACHA20_POLY1305,
+    )
+    # Byte-exact match against the RFC's reference protected
+    # packet -- this is the canonical interop check.
+    var rfc_packet = _hex("4cfe4189655e5cd55c41f69080575d7999c25a5bfb")
+    _eq_bytes(packet, rfc_packet)
+    # And the inverse: unprotect of the same bytes recovers
+    # plaintext 0x01 + the same pn. The receiver must already
+    # know enough of the high bits to recover pn from the 3-byte
+    # truncated wire encoding per RFC 9000 §A.3, so we pass
+    # ``largest_received_pn = pn - 1``.
+    var got = unprotect_1rtt_packet(
+        Span[UInt8, _](packet),
+        Span[UInt8, _](secret),
+        pn - UInt64(1),
+        0,
+        QuicAead.CHACHA20_POLY1305,
+    )
+    assert_equal(got.packet_number, pn)
+    assert_equal(got.pn_length, pn_length)
+    _eq_bytes(got.payload, plaintext)
+
+
+def test_handshake_rejects_short_header() raises:
+    """A short-header datagram fed into unprotect_handshake
+    raises -- catches the case where a 1-RTT packet reaches the
+    Handshake branch (e.g. after a state-machine bug or a peer
+    mis-sequencing). The error is a clean raise, not a panic /
+    out-of-bounds read."""
+    var secret = _synth_secret()
+    # First byte 0x40 = short-header indicator + fixed bit.
+    var datagram = List[UInt8]()
+    datagram.append(UInt8(0x40))
+    for _ in range(63):
+        datagram.append(UInt8(0))
+    var raised = False
+    try:
+        _ = unprotect_handshake_packet(
+            Span[UInt8, _](datagram),
+            Span[UInt8, _](secret),
+            UInt64(0),
+            QuicAead.AES_128_GCM,
+        )
+    except:
+        raised = True
+    assert_equal(raised, True)
+
+
+def test_1rtt_rejects_long_header() raises:
+    """A long-header datagram fed into unprotect_1rtt raises
+    -- the symmetric guard for the above. Catches the case where
+    an Initial / Handshake packet reaches the 1-RTT branch."""
+    var secret = _synth_secret()
+    # First byte 0xC0 = long-header + fixed bit + type-Initial.
+    var datagram = List[UInt8]()
+    datagram.append(UInt8(0xC0))
+    for _ in range(63):
+        datagram.append(UInt8(0))
+    var raised = False
+    try:
+        _ = unprotect_1rtt_packet(
+            Span[UInt8, _](datagram),
+            Span[UInt8, _](secret),
+            UInt64(0),
+            0,
+            QuicAead.AES_128_GCM,
+        )
+    except:
+        raised = True
+    assert_equal(raised, True)
+
+
 def main() raises:
     test_a1_initial_secrets()
     test_a1_client_packet_keys()
@@ -278,4 +607,11 @@ def main() raises:
     test_a2_client_initial_aead_round_trip()
     test_a3_server_initial_aead_round_trip()
     test_a2_client_initial_full_ciphertext_bytes()
-    print("test_rfc9001_appendix_a: 6 passed")
+    test_handshake_round_trip_short_payload()
+    test_handshake_round_trip_aes_256_gcm()
+    test_1rtt_round_trip_synthetic()
+    test_1rtt_round_trip_empty_dcid_pn_length_3()
+    test_a5_chacha20_short_header_round_trip()
+    test_handshake_rejects_short_header()
+    test_1rtt_rejects_long_header()
+    print("test_rfc9001_appendix_a: 13 passed")
