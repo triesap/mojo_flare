@@ -29,25 +29,12 @@ pacing budget gate ``sendmmsg`` on the egress path.
   to route inbound datagrams via the Destination Connection ID
   in the packet header (RFC 9000 §5.1).
 
-## What's deferred to follow-ups inside this track
-
-- The per-packet decrypt + state-machine dispatch
-  (:meth:`QuicConnection.handle_packet`) -- commit 2/5.
-- The PTO / idle / ack-delay TimerWheel entries -- commit 3/5.
-- The CC reactor hooks (``update_on_ack`` /
-  ``update_on_loss`` / ``pacing_budget``) -- commit 4/5.
-- ``recvmmsg`` + ``UDP_GRO`` batching on the ingress path and
-  ``sendmmsg`` + ``UDP_SEGMENT`` on the egress path -- not in
-  scope for v0.8; the single-datagram ``recv_from`` loop is the
-  functional contract this cycle ships.
-
 References:
 - RFC 9000 §5 "Connections" -- Connection ID routing.
 - RFC 9000 §10 "Connection Termination" -- idle / draining.
 - RFC 9000 §17 "Packet Formats" -- long / short header parse
   for the dispatch path.
-- RFC 9002 §6.2 "PTO and probe packets" -- PTO timer wiring
-  (deferred to commit 3/5 of this track).
+- RFC 9002 §6.2 "PTO and probe packets" -- PTO timer wiring.
 """
 
 from std.collections import Dict, List, Optional
@@ -79,6 +66,7 @@ from .packet import (
     parse_short_header,
 )
 from .protection import (
+    decode_packet_number,
     protect_initial_packet,
     unprotect_1rtt_packet,
     unprotect_handshake_packet,
@@ -114,8 +102,10 @@ from ..tls._rustls_quic_ffi import (
     _do_accept,
     _do_feed_crypto,
     _do_have_keys,
+    _do_header_decrypt,
     _do_header_encrypt,
     _do_is_handshake_complete,
+    _do_packet_decrypt,
     _do_packet_encrypt,
     _do_session_free,
     _do_take_crypto,
@@ -159,21 +149,14 @@ def _ready_sentinel() -> List[UInt8]:
     """Single-byte readiness marker stamped onto
     :attr:`QuicConnection.rx_handshake_secret` /
     `.tx_handshake_secret` / `.rx_1rtt_secret` / `.tx_1rtt_secret`
-    by :meth:`QuicListener._dispatch_crypto_frames` when rustls's
-    `KeyChange` pump installs per-level `Keys`.
+    when rustls installs per-level `Keys`.
 
-    Why a sentinel rather than the real traffic secret bytes:
-    rustls 0.23's `quic::Secrets` exposes the client/server
-    traffic secrets as `pub(crate)` fields (sealed); the
-    `quic::Keys` accessors only hand back trait-object
-    `Box<dyn PacketKey>` / `Box<dyn HeaderProtectionKey>`
-    handles.  Phase F routes post-Initial AEAD through those
-    trait-object handles via
-    :class:`flare.tls.RustlsQuicSession.packet_encrypt` +
-    `.packet_decrypt` + `.header_encrypt` + `.header_decrypt`,
-    so the Mojo side never sees raw traffic secrets.  The
-    sentinel keeps the `len(rx_*_secret) == 0` gates that v0.8
-    shipped without churning the public surface.
+    rustls keeps `quic::Secrets` sealed (`pub(crate)`) and only
+    hands back trait-object key handles, so post-Initial AEAD
+    routes through `RustlsQuicSession.packet_{encrypt,decrypt}` +
+    `.header_{encrypt,decrypt}`. The Mojo side never sees raw
+    traffic secrets; the sentinel just flips the
+    `len(rx_*_secret) == 0` readiness gates.
     """
     var out = List[UInt8]()
     out.append(UInt8(0xFF))
@@ -238,7 +221,7 @@ struct _SessionSlot(Copyable, Movable):
     """Current outbound encryption level (one of the
     :class:`flare.tls.rustls_quic.QuicEncryptionLevel` codepoints).
     Starts at ``INITIAL``; advances as the rustls KeyChange enum
-    surfaces handshake + 1-RTT keys (Track Q10-W)."""
+    surfaces handshake + 1-RTT keys."""
 
 
 # -- Configuration carrier ----------------------------------------------
@@ -334,21 +317,19 @@ struct QuicConnection(Copyable, Movable):
     - A :trait:`flare.quic.cc.CongestionController` carrier
       (CUBIC in production, Reno in deterministic tests).
     - A :class:`flare.tls.rustls_quic.RustlsQuicSession`
-      carrying the per-encryption-level keys + handshake state
-      (wired in commit 2/5 of Track Q3-W).
+      carrying the per-encryption-level keys + handshake state.
 
     The reactor's per-packet hot path runs:
 
     1. Parse the long/short header out of the datagram
        (``flare.quic.packet``) -- done in
        :meth:`QuicListener.dispatch_datagram`.
-    2. Decrypt the protected payload via OpenSSL AEAD or rustls
-       (commit 2/5 of Track Q3-W).
+    2. Decrypt the protected payload via OpenSSL AEAD (Initial)
+       or rustls (Handshake / 1-RTT).
     3. Dispatch each frame in the decrypted payload through
        :func:`flare.quic.state.handle_frame_buf`, which advances
        the per-stream + per-connection state machines.
-    4. Drive the CC controller with any newly-ACKed bytes
-       (commit 4/5 of Track Q3-W).
+    4. Drive the CC controller with any newly-ACKed bytes.
     5. Build any reply packets the state machine queued and
        feed them to the rustls session for encryption.
     """
@@ -387,12 +368,12 @@ struct QuicConnection(Copyable, Movable):
     """Timer-wheel id of the currently-scheduled PTO (probe
     timeout) entry. Re-armed on every ack-eliciting send +
     cleared on every ACK that retires the relevant packet
-    number space (commit 4/5 of Track Q3-W)."""
+    number space."""
 
     var ack_delay_timer_id: UInt64
     """Timer-wheel id of the currently-deferred ACK timer. Set
     when ``conn.ack_pending`` flips True; cleared when the ACK
-    is actually emitted (commit 4/5 of Track Q3-W)."""
+    is actually emitted."""
 
     var cc_state: CcState
     """Per-connection congestion-controller state. Drives the
@@ -400,7 +381,7 @@ struct QuicConnection(Copyable, Movable):
     :mod:`flare.quic.cc`. Initialized via :func:`cc_init` with
     RFC 9002 §B.2 defaults; the reactor hands per-ACK +
     per-loss samples in through :meth:`update_on_ack` /
-    :meth:`update_on_loss` (Track Q3-W commit 4/5)."""
+    :meth:`update_on_loss`."""
 
     var last_send_us: UInt64
     """Wall-clock timestamp (microseconds) of the most-recent
@@ -411,23 +392,21 @@ struct QuicConnection(Copyable, Movable):
     :func:`flare.quic.cc.pacing_budget` function consumes."""
 
     var rx_handshake_secret: List[UInt8]
-    """Inbound Handshake-level traffic secret (RFC 9001 §5.1).
-    On a server this is the client_handshake_traffic_secret.
-    The Q11-W reactor populates this from rustls's ``KeyChange``
-    when the TLS state machine advances past Initial. Empty
-    until set: Handshake packets that arrive while the slot is
-    empty drop silently (the peer will retransmit)."""
+    """Inbound Handshake-level readiness marker (RFC 9001 §5.1).
+    Stamped with the readiness sentinel once rustls installs the
+    Handshake keys. Empty until set: Handshake packets that
+    arrive while the slot is empty drop silently (the peer will
+    retransmit)."""
 
     var tx_handshake_secret: List[UInt8]
-    """Outbound Handshake-level traffic secret. On a server
-    this is the server_handshake_traffic_secret. Populated by
-    Q11-W in lockstep with :attr:`rx_handshake_secret`. Used by
-    :func:`protect_handshake_packet` on the send side."""
+    """Outbound Handshake-level readiness marker. Stamped in
+    lockstep with :attr:`rx_handshake_secret`; gates the
+    Handshake egress builder."""
 
     var rx_1rtt_secret: List[UInt8]
-    """Inbound 1-RTT (application) traffic secret. Populated by
-    the Q11-W reactor once rustls reports handshake-complete.
-    Empty until then; short-header packets dropped silently."""
+    """Inbound 1-RTT readiness marker. Stamped once rustls
+    reports handshake-complete. Empty until then; short-header
+    packets dropped silently."""
 
     var tx_1rtt_secret: List[UInt8]
     """Outbound 1-RTT traffic secret. Populated alongside
@@ -436,9 +415,8 @@ struct QuicConnection(Copyable, Movable):
     var tx_initial_pn: UInt64
     """Next packet number to use on the outbound Initial path.
     Monotonic per RFC 9001 §5.3; incremented after every
-    successful Initial send. The Q11-W reactor reads + bumps
-    this when draining :attr:`QuicListener.tls_egress_queues`
-    onto the wire."""
+    successful Initial send. Read + bumped when draining
+    :attr:`QuicListener.tls_egress_queues` onto the wire."""
 
     var tx_initial_offset: UInt64
     """Cumulative offset of CRYPTO bytes the server has emitted
@@ -449,7 +427,7 @@ struct QuicConnection(Copyable, Movable):
 
     var tx_handshake_pn: UInt64
     """Next packet number to use on the outbound Handshake
-    path. Reserved for Q12-W's reactor drain expansion."""
+    path."""
 
     var tx_handshake_offset: UInt64
     """Cumulative CRYPTO offset at the Handshake level."""
@@ -490,14 +468,9 @@ struct QuicConnection(Copyable, Movable):
         var rx_secret: List[UInt8],
         var tx_secret: List[UInt8],
     ):
-        """Install per-direction Handshake traffic secrets.
-        Called by the Q11-W reactor when the rustls session
-        emits its first ``KeyChange::Handshake`` after the
-        Initial-level CRYPTO exchange completes (RFC 9001
-        §5.1). After this, Handshake packets at this connection
-        decrypt cleanly through
-        :func:`unprotect_handshake_packet`.
-        """
+        """Install per-direction Handshake traffic secrets
+        (RFC 9001 §5.1), called when rustls emits its first
+        ``KeyChange::Handshake``."""
         self.rx_handshake_secret = rx_secret^
         self.tx_handshake_secret = tx_secret^
 
@@ -507,11 +480,8 @@ struct QuicConnection(Copyable, Movable):
         var tx_secret: List[UInt8],
     ):
         """Install per-direction 1-RTT (application) traffic
-        secrets. Called by the Q11-W reactor on rustls's
-        ``KeyChange::OneRtt`` -- the handshake-complete moment.
-        Short-header packets arriving after this decrypt
-        through :func:`unprotect_1rtt_packet`.
-        """
+        secrets, called on rustls's ``KeyChange::OneRtt`` -- the
+        handshake-complete moment."""
         self.rx_1rtt_secret = rx_secret^
         self.tx_1rtt_secret = tx_secret^
 
@@ -530,9 +500,8 @@ struct QuicConnection(Copyable, Movable):
     def on_pto_expired(mut self):
         """RFC 9002 §6.2 -- the PTO timer fired. The state
         machine flags that a probe packet is owed; the egress
-        path (commit 4/5 of Track Q3-W) sends one or two PING /
-        PADDING packets so the peer's ACK recovers the lost
-        packet-number space."""
+        path sends one or two PING / PADDING packets so the
+        peer's ACK recovers the lost packet-number space."""
         self.pto_timer_id = UInt64(0)
         self.conn.ack_pending = True  # forces an ACK on the next send
 
@@ -611,17 +580,12 @@ struct QuicConnection(Copyable, Movable):
           derived from the connection's ``local_cid`` (RFC 9001
           §5.2). This is the first-flight path.
         - Long-header Handshake: handled iff
-          :attr:`rx_handshake_secret` is non-empty. The Q11-W
-          reactor installs the secret from rustls's
-          ``KeyChange::Handshake`` callback as soon as the
-          Initial-level CRYPTO exchange completes.
+          :attr:`rx_handshake_secret` is non-empty.
         - Short-header 1-RTT: handled iff :attr:`rx_1rtt_secret`
-          is non-empty. The Q11-W reactor installs that on
-          rustls's ``KeyChange::OneRtt`` (handshake-complete).
-        - Long-header 0-RTT + Retry: deferred to Q11-W+ (the
-          first because flare doesn't accept 0-RTT yet, the
-          second because Retry is server-emit-only and never
-          arrives at this server's handle_packet path).
+          is non-empty.
+        - Long-header 0-RTT + Retry: not handled (flare does not
+          accept 0-RTT, and Retry is server-emit-only so it
+          never arrives at this path).
 
         For each handled level the decrypted frame bytes feed
         :func:`flare.quic.state.handle_frame_buf`, which advances
@@ -690,10 +654,10 @@ struct QuicConnection(Copyable, Movable):
     ) raises -> ConnectionEvents:
         """Per-level Handshake decrypt + frame dispatch.
 
-        Requires :attr:`rx_handshake_secret` to be installed by
-        the Q11-W reactor's ``KeyChange::Handshake`` plumb-in.
-        Until then this returns empty events so the loop doesn't
-        crash on legitimate post-Initial traffic.
+        Returns empty events until :attr:`rx_handshake_secret` is
+        installed. The listener now decrypts post-Initial packets
+        through rustls; this OpenSSL path is retained for unit
+        tests that exercise the sans-I/O connection directly.
         """
         var events = empty_events()
         if len(self.rx_handshake_secret) == 0:
@@ -725,13 +689,12 @@ struct QuicConnection(Copyable, Movable):
     ) raises -> ConnectionEvents:
         """Per-level 1-RTT decrypt + frame dispatch.
 
-        Requires :attr:`rx_1rtt_secret` to be installed by the
-        Q11-W reactor's ``KeyChange::OneRtt`` plumb-in. The
-        ``dcid_length`` arg to :func:`unprotect_1rtt_packet`
-        comes from the connection's pinned ``local_cid`` length
-        -- the short header carries the DCID raw but not its
-        length (RFC 9000 §17.3), so the receiver supplies it
-        from per-connection state.
+        Returns empty events until :attr:`rx_1rtt_secret` is
+        installed. ``dcid_length`` comes from the connection's
+        pinned ``local_cid`` length -- a short header carries the
+        DCID bytes but not its length (RFC 9000 §17.3), so the
+        receiver supplies it from per-connection state. Retained
+        for unit tests; the listener decrypts 1-RTT via rustls.
         """
         var events = empty_events()
         if len(self.rx_1rtt_secret) == 0:
@@ -754,6 +717,34 @@ struct QuicConnection(Copyable, Movable):
             cursor += consumed
         if up.packet_number > self.conn.largest_received_packet:
             self.conn.largest_received_packet = up.packet_number
+        return events^
+
+    def dispatch_plaintext(
+        mut self,
+        plaintext: Span[UInt8, _],
+        now_us: UInt64,
+        packet_number: UInt64,
+    ) raises -> ConnectionEvents:
+        """Drive already-decrypted frame bytes through the
+        sans-I/O state machine.
+
+        The listener decrypts Handshake + 1-RTT packets through
+        the rustls session (which holds the real AEAD keys) and
+        hands the plaintext here, since the sans-I/O connection
+        has no rustls handle. Mirrors the frame-dispatch loop in
+        the per-level handlers minus the decrypt step.
+        """
+        var events = empty_events()
+        var cursor = 0
+        while cursor < len(plaintext):
+            var consumed = handle_frame_buf(
+                self.conn, plaintext[cursor:], now_us, events
+            )
+            if consumed <= 0:
+                break
+            cursor += consumed
+        if packet_number > self.conn.largest_received_packet:
+            self.conn.largest_received_packet = packet_number
         return events^
 
 
@@ -884,43 +875,38 @@ struct QuicListener(Movable):
     every feed-crypto / take-crypto roundtrip."""
     var tls_egress_queues: List[List[UInt8]]
     """Per-slot outbound CRYPTO byte queue at the INITIAL level.
-    Q9-W lands the drain side: each successful :meth:`feed_crypto`
-    is followed by :meth:`take_crypto` and the resulting bytes
-    append here.  Track Q11-W drains this queue inside
-    :meth:`_drain_and_send` -- the bytes are wrapped in a QUIC
-    CRYPTO frame, packaged inside an Initial-level packet,
-    AEAD-protected with :func:`protect_initial_packet`, and
-    emitted via :meth:`send_to`. Cleared after every successful
-    drain."""
+    Each successful :meth:`feed_crypto` is followed by
+    :meth:`take_crypto` and the resulting bytes append here;
+    :meth:`_drain_and_send` wraps them in a CRYPTO frame inside an
+    Initial-level packet, AEAD-protects with
+    :func:`protect_initial_packet`, and emits via :meth:`send_to`.
+    Cleared after every successful drain."""
     var tls_handshake_egress_queues: List[List[UInt8]]
     """Per-slot outbound CRYPTO byte queue at the HANDSHAKE
     level. Populated by :meth:`_dispatch_crypto_frames` after
-    rustls emits its first ``KeyChange::Handshake`` (Phase F
-    commit 1/6 plumbed the KeyChange capture into the FFI shim,
-    commit 3/6 routes the bytes onto this per-level queue).
-    Drained by the Phase F commit 4/6 egress builder which wraps
-    each batch in a CRYPTO frame inside a Handshake-level packet,
-    AEAD-protects via :class:`RustlsQuicSession.packet_encrypt`
-    at level 2, and emits via :meth:`send_to`."""
+    rustls emits ``KeyChange::Handshake``. Drained by the egress
+    builder which wraps each batch in a CRYPTO frame inside a
+    Handshake-level packet, AEAD-protects via
+    :class:`RustlsQuicSession.packet_encrypt` at level 2, and
+    emits via :meth:`send_to`."""
     var tls_1rtt_egress_queues: List[List[UInt8]]
     """Per-slot outbound CRYPTO byte queue at the 1-RTT
     (APPLICATION) level. Populated by
     :meth:`_dispatch_crypto_frames` after rustls emits
-    ``KeyChange::OneRtt`` -- the handshake-complete moment.
-    Drained by the Phase F commit 4/6 egress builder which
+    ``KeyChange::OneRtt``. Drained by the egress builder which
     encodes each batch into a 1-RTT short-header packet,
     AEAD-protects via :class:`RustlsQuicSession.packet_encrypt`
     at level 3, and emits via :meth:`send_to`."""
     var peer_addrs: List[SocketAddr]
     """Per-slot peer UDP address. Parallel slab to
     :attr:`connections` -- captured in :meth:`_accept_initial`
-    from the inbound datagram's sender. The Q11-W reactor's
-    egress path reads this to call :meth:`send_to(slot, ...)`
-    without re-parsing the inbound datagram."""
+    from the inbound datagram's sender. The egress path reads
+    this to call :meth:`send_to(slot, ...)` without re-parsing
+    the inbound datagram."""
     var h3_connections: List[H3Connection]
     """Per-slot HTTP/3 connection driver. Parallel slab to
     :attr:`connections` -- one :class:`flare.h3.H3Connection`
-    instance per QUIC connection (Track Q12-W). Allocated in
+    instance per QUIC connection. Allocated in
     :meth:`_accept_initial` so every accepted connection has its
     H3 driver ready; STREAM frames from the post-handshake 1-RTT
     payload route through :meth:`_route_h3_stream_chunks` into
@@ -943,12 +929,11 @@ struct QuicListener(Movable):
     :meth:`flare.h3.H3Connection.take_response_frames` after a
     handler-produced :class:`Response` is encoded. Drained by
     the 1-RTT egress path once the per-connection 1-RTT keys
-    are installed (Q12-W follow-up; the bytes here today
-    accumulate until the rustls key-change bridge is wired)."""
+    are installed."""
     var timer_wheel: TimerWheel
     """Per-listener :class:`flare.runtime.timer_wheel.TimerWheel`
-    driving PTO / idle / ack-delay timeouts (Track Q3-W commit
-    3/5). Each scheduled timer's token is
+    driving PTO / idle / ack-delay timeouts. Each scheduled
+    timer's token is
     :func:`flare.quic.timers.encode_timer_token(kind, slot)`;
     :meth:`advance_timers` dispatches each fired token to the
     matching :class:`QuicConnection` callback."""
@@ -1014,8 +999,8 @@ struct QuicListener(Movable):
         Constructs the per-listener rustls QUIC acceptor from
         ``config.rustls_config`` at bind time so each accepted
         connection's TLS session is materialized against the
-        same long-lived ``ServerConfig`` (Track Q9-W). An empty
-        / malformed PEM does not raise here; the acceptor
+        same long-lived ``ServerConfig``. An empty / malformed
+        PEM does not raise here; the acceptor
         surfaces a NULL handle and CRYPTO bytes route through
         the silent-drop branch.
         """
@@ -1038,9 +1023,7 @@ struct QuicListener(Movable):
         return True
 
     def connection_count(self) -> Int:
-        """Number of connection slots currently allocated. Slots
-        are append-only in this commit; the sweep for closed
-        connections lands with the timer-wheel commit (3/5)."""
+        """Number of connection slots currently allocated."""
         return len(self.connections)
 
     def dispatch_datagram(
@@ -1053,19 +1036,15 @@ struct QuicListener(Movable):
         :attr:`cid_table`, and either:
 
         * Routes the datagram to the existing slot via
-          :meth:`QuicConnection.handle_packet` -- the per-packet
-          decrypt + state-machine drive (commit 2/5 of this
-          track). Decryption failures are caught and converted
-          to silent drops so a single bad sender can't poison
-          the listener.
+          :meth:`_handle_inbound`. Decryption failures are caught
+          and converted to silent drops so a single bad sender
+          can't poison the listener.
         * Allocates a new slot for an Initial packet with an
           unknown DCID (the QUIC accept path -- RFC 9000 §7),
-          then drives the same handle_packet path on the new
-          connection so the first Initial advances the state
-          machine.
+          then drives the same inbound path on the new connection
+          so the first Initial advances the state machine.
         * Returns ``-1`` to drop short-header packets with
-          unknown DCIDs (the stateless-reset path lands in a
-          later cycle; for now those datagrams are silently
+          unknown DCIDs (those datagrams are silently
           discarded).
         """
         if len(datagram) < 1:
@@ -1082,47 +1061,163 @@ struct QuicListener(Movable):
         return slot
 
     def _handle_inbound(mut self, slot: Int, datagram: Span[UInt8, _]) raises:
-        """Drive ``QuicConnection.handle_packet`` on the matched
-        slot. Caught + dropped here:
+        """Decrypt + dispatch one inbound datagram by encryption
+        level.
 
-        * Decryption failures (bad AEAD tag, malformed cipher,
-          wrong key) -- the QUIC protocol mandates silent drop
-          per RFC 9001 §5.2.
-        * Frame parse failures inside the decrypted payload --
-          again silent drop; the connection stays usable for
-          subsequent packets that decode cleanly.
+        Initial packets decrypt off the DCID-derived secret in
+        the sans-I/O connection. Handshake + 1-RTT packets carry
+        keys rustls keeps sealed, so they decrypt through the
+        slot's rustls session here (the listener owns the FFI
+        handle) and the plaintext drives the state machine via
+        :meth:`QuicConnection.dispatch_plaintext`.
 
-        Other state-machine errors propagate to the caller so
-        the reactor can log + close the connection.
-
-        On a successful decrypt + parse pass also forwards any
-        inbound CRYPTO frame bytes to the slot's rustls QUIC
-        session via :meth:`_dispatch_crypto_frames` and re-arms
-        the per-connection idle timer.
+        Decrypt and frame-parse failures drop silently per
+        RFC 9001 sec 5.2; the slot stays alive for retransmits.
+        On success, inbound CRYPTO bytes feed rustls via
+        :meth:`_dispatch_crypto_frames` and the idle timer re-arms.
         """
-        var now_us = UInt64(0)  # Wall-clock driven from commit 4/5
+        var now_us = UInt64(0)
+        var inbound_lvl = _inbound_level_for_datagram(datagram)
         var conn = self.connections[slot].copy()
         var events = empty_events()
         var ok = True
-        try:
-            events = conn.handle_packet(datagram, now_us)
-        except:
-            # Silent drop on decrypt + parse failures
-            # (RFC 9001 §5.2). The connection slot stays alive
-            # for retransmits + subsequent valid packets.
-            ok = False
+        if inbound_lvl == QuicEncryptionLevel.INITIAL:
+            try:
+                events = conn.handle_packet(datagram, now_us)
+            except:
+                ok = False
+        elif inbound_lvl == QuicEncryptionLevel.HANDSHAKE:
+            if len(conn.rx_handshake_secret) == 0:
+                ok = False  # keys not installed yet; drop
+            else:
+                try:
+                    var dec = self._decrypt_post_initial(
+                        slot,
+                        datagram,
+                        inbound_lvl,
+                        conn.local_cid.length(),
+                    )
+                    events = conn.dispatch_plaintext(
+                        Span[UInt8, _](dec[0]), now_us, dec[1]
+                    )
+                except:
+                    ok = False
+        elif inbound_lvl == QuicEncryptionLevel.APPLICATION:
+            if len(conn.rx_1rtt_secret) == 0:
+                ok = False
+            else:
+                try:
+                    var dec = self._decrypt_post_initial(
+                        slot,
+                        datagram,
+                        inbound_lvl,
+                        conn.local_cid.length(),
+                    )
+                    events = conn.dispatch_plaintext(
+                        Span[UInt8, _](dec[0]), now_us, dec[1]
+                    )
+                except:
+                    ok = False
+        else:
+            ok = False  # 0-RTT / Retry not handled here
         self.connections[slot] = conn^
         if not ok:
             return
-        # Derive the inbound packet's encryption level from the
-        # header form so `_dispatch_crypto_frames` feeds inbound
-        # CRYPTO bytes to rustls at the right level. Initial /
-        # Handshake / 1-RTT only -- 0-RTT is rejected upstream,
-        # Retry never reaches a connection's handle_packet.
-        var inbound_lvl = _inbound_level_for_datagram(datagram)
         self._dispatch_crypto_frames(slot, events, inbound_lvl)
         self._route_h3_stream_chunks(slot, events)
         _ = self.schedule_idle_timeout(slot)
+
+    def _decrypt_post_initial(
+        mut self,
+        slot: Int,
+        datagram: Span[UInt8, _],
+        level: Int,
+        dcid_length: Int,
+    ) raises -> Tuple[List[UInt8], UInt64]:
+        """Strip header protection + AEAD-decrypt a Handshake or
+        1-RTT datagram through the slot's rustls session, which
+        owns the real per-level keys.
+
+        Returns ``(plaintext, packet_number)``. Raises on any
+        bounds, FFI, or AEAD failure so the caller drops the
+        packet (RFC 9001 sec 5.2).
+
+        Header protection: rustls's ``decrypt_in_place`` unmasks
+        the first byte, derives the packet-number length from it,
+        then XORs only that many bytes of the supplied slice. A
+        4-byte scratch copy of the pn region is therefore safe --
+        only ``pn_length`` bytes are touched, the rest discarded,
+        and the datagram bytes are never mutated.
+        """
+        if slot < 0 or slot >= len(self.tls_sessions):
+            raise Error("_decrypt_post_initial: slot out of range")
+        var handle = self.tls_sessions[slot].handle
+        if handle == 0:
+            raise Error("_decrypt_post_initial: NULL session handle")
+        var pn_offset: Int
+        if level == QuicEncryptionLevel.HANDSHAKE:
+            pn_offset = parse_long_header(datagram).payload_offset
+        else:
+            pn_offset = parse_short_header(datagram, dcid_length).payload_offset
+        # The HP sample sits 4 bytes past the pn field start
+        # (RFC 9001 sec 5.4.2); that window must fit the datagram.
+        var sample_offset = pn_offset + 4
+        if sample_offset + 16 > len(datagram):
+            raise Error(
+                "_decrypt_post_initial: HP sample window exceeds packet"
+            )
+        var sample = List[UInt8]()
+        for i in range(16):
+            sample.append(datagram[sample_offset + i])
+        # Scratch the first byte + 4 candidate pn bytes; rustls
+        # unmasks first, reads pn_length, XORs only that many.
+        var first_local: UInt8 = datagram[0]
+        var pn_local = List[UInt8]()
+        for i in range(4):
+            pn_local.append(datagram[pn_offset + i])
+        var first_addr = Int(UnsafePointer(to=first_local))
+        _do_header_decrypt(
+            self.tls_acceptor._lib,
+            handle,
+            level,
+            sample,
+            first_addr,
+            Int(pn_local.unsafe_ptr()),
+            4,
+        )
+        var pn_length = (Int(first_local) & 0x03) + 1
+        var truncated_pn = UInt64(0)
+        for i in range(pn_length):
+            truncated_pn = (truncated_pn << 8) | UInt64(pn_local[i])
+        var packet_number = decode_packet_number(
+            truncated_pn,
+            pn_length,
+            self.connections[slot].conn.largest_received_packet,
+        )
+        # AAD is the unprotected header: first byte + bytes up to
+        # the pn field + the pn_length real pn bytes.
+        var header = List[UInt8]()
+        header.append(first_local)
+        for i in range(1, pn_offset):
+            header.append(datagram[i])
+        for i in range(pn_length):
+            header.append(pn_local[i])
+        var ciphertext_start = pn_offset + pn_length
+        var payload = List[UInt8]()
+        for i in range(ciphertext_start, len(datagram)):
+            payload.append(datagram[i])
+        var plaintext_len = _do_packet_decrypt(
+            self.tls_acceptor._lib,
+            handle,
+            level,
+            packet_number,
+            header,
+            payload,
+        )
+        var plaintext = List[UInt8]()
+        for i in range(plaintext_len):
+            plaintext.append(payload[i])
+        return (plaintext^, packet_number)
 
     def _dispatch_crypto_frames(
         mut self, slot: Int, events: ConnectionEvents, inbound_lvl: Int
@@ -1135,24 +1230,17 @@ struct QuicListener(Movable):
         keys on the slot's session.  When the keys at a level
         flip from None to Some(_) we stamp a sentinel onto the
         connection's per-level secret carrier so the
-        post-Initial decrypt path (Phase F commit 4/6) flips
-        from "drop silently" to "dispatch via rustls".
+        post-Initial decrypt path flips from "drop silently" to
+        "dispatch via rustls".
 
-        Per Phase F commit 1+2/6 the Mojo side does NOT carry
-        raw traffic secrets -- rustls's `quic::Secrets` is
-        `pub(crate)`-sealed. The carriers
-        :attr:`QuicConnection.rx_handshake_secret` /
+        The Mojo side does NOT carry raw traffic secrets --
+        rustls's `quic::Secrets` is `pub(crate)`-sealed. The
+        carriers :attr:`QuicConnection.rx_handshake_secret` /
         `.tx_handshake_secret` / `.rx_1rtt_secret` /
         `.tx_1rtt_secret` are reused as boolean readiness
         markers: empty list == not installed; non-empty list
         (length 1, contents `0xff`) == installed and the rustls
         session has the keys.
-
-        Phase F commit 3/6 (this commit) only installs the
-        sentinels; commit 4/6 wires the Handshake / 1-RTT decrypt
-        path through :meth:`RustlsQuicSession.packet_decrypt` +
-        `header_decrypt` (and the egress path through
-        `packet_encrypt` + `header_encrypt`).
 
         Both the feed-crypto and take-crypto FFI calls route
         through :attr:`tls_acceptor._lib` so the .so stays
@@ -1190,10 +1278,9 @@ struct QuicListener(Movable):
 
         # Drain rustls's outbound CRYPTO bytes at every level
         # rustls might have buffered for us. The KeyChange-driven
-        # pump in `flare_rustls_quic_drain_outbound` (Phase F
-        # commit 1/6) routes bytes onto the correct per-level
-        # pending queue inside the Rust shim; we just call
-        # take_crypto once per level here and append.
+        # pump in `flare_rustls_quic_drain_outbound` routes bytes
+        # onto the correct per-level pending queue inside the Rust
+        # shim; we just call take_crypto once per level and append.
         try:
             var out_initial = _do_take_crypto(
                 self.tls_acceptor._lib,
@@ -1259,7 +1346,7 @@ struct QuicListener(Movable):
                 )
             self.connections[slot] = conn_copy^
 
-    # -- H3 dispatch surface (Track Q12-W) --------------------------------
+    # -- H3 dispatch surface ----------------------------------------------
 
     def _route_h3_stream_chunks(
         mut self, slot: Int, events: ConnectionEvents
@@ -1335,12 +1422,9 @@ struct QuicListener(Movable):
         the resulting frame bytes into
         :attr:`h3_response_egress` keyed by ``slot:stream_id``.
 
-        The byte buffer here is the input to a future QUIC
-        STREAM frame egress pass; the actual on-the-wire
-        emission requires the 1-RTT keys to be installed via
-        the rustls bridge (deferred follow-up). Until then the
-        buffer accumulates and the Handler dispatch path is
-        still exercised end-to-end so tests can verify the wire.
+        The byte buffer feeds the 1-RTT STREAM-frame egress pass
+        in :meth:`_drain_h3_response_egress`, which emits on the
+        wire once the slot's 1-RTT keys are installed.
         """
         if slot < 0 or slot >= len(self.h3_connections):
             raise Error(
@@ -1414,14 +1498,12 @@ struct QuicListener(Movable):
         :attr:`cid_table` so subsequent Initials addressed to
         the same DCID route here. RFC 9000 §7.2 says the server
         SHOULD choose its own SCID and switch to it on the
-        server-side response; that follow-up is part of the
-        per-packet wiring in commit 2/5 of this track.
+        server-side response.
 
-        Also materializes the per-slot rustls QUIC session
-        (Track Q9-W), the empty CRYPTO egress queue, the peer
-        UDP address (Track Q11-W -- so the egress drain can
-        :meth:`send_to` without re-parsing), and arms the
-        per-connection idle timeout.
+        Also materializes the per-slot rustls QUIC session, the
+        empty CRYPTO egress queue, the peer UDP address (so the
+        egress drain can :meth:`send_to` without re-parsing), and
+        arms the per-connection idle timeout.
         """
         var local_cid = lh.dcid.copy()
         var peer_cid = lh.scid.copy()
@@ -1453,8 +1535,7 @@ struct QuicListener(Movable):
         opaque handle at 0; this method short-circuits to the
         NULL-handle sentinel slot. Production paths with a real
         PEM cert call into :func:`_do_accept` with an empty
-        transport-parameters blob (Q10-W lands the encoded
-        transport parameters); any FFI rejection also falls
+        transport-parameters blob; any FFI rejection also falls
         through to the NULL sentinel so the slab stays in
         lockstep with :attr:`connections`.
         """
@@ -1469,16 +1550,15 @@ struct QuicListener(Movable):
     def tick(mut self, timeout_ms: Int = 100) raises -> Bool:
         """Drain at most one inbound datagram and pump egress.
 
-        Reactor I/O loop step per Track Q11-W:
+        Reactor I/O loop step:
 
         1. ``recv_from`` -- pull one datagram off the socket (or
            time out cleanly after ``timeout_ms``).
         2. ``dispatch_datagram`` -- route by DCID; the matched
-           slot's :meth:`QuicConnection.handle_packet` advances
-           the sans-I/O state machine and surfaces inbound
-           CRYPTO frames; the bridge feeds them to rustls and
-           drains outbound CRYPTO bytes into
-           :attr:`tls_egress_queues`.
+           slot's :meth:`_handle_inbound` advances the sans-I/O
+           state machine and surfaces inbound CRYPTO frames; the
+           bridge feeds them to rustls and drains outbound CRYPTO
+           bytes into :attr:`tls_egress_queues`.
         3. ``drain_all_egress`` -- every slot with pending bytes
            gets a server Initial packet protected via
            :func:`protect_initial_packet` and emitted through
@@ -1561,8 +1641,7 @@ struct QuicListener(Movable):
           KeyChange::OneRtt).
           Encrypted via :meth:`_build_handshake_response`
           which routes through rustls's
-          ``Keys.local.packet.encrypt_in_place`` (Phase F
-          commit 4/6).
+          ``Keys.local.packet.encrypt_in_place``.
         * ``tls_1rtt_egress_queues[slot]`` -- 1-RTT CRYPTO
           (rustls post-handshake messages like
           NewSessionTicket).
@@ -1645,9 +1724,8 @@ struct QuicListener(Movable):
         protected at 1-RTT via the slot's rustls session, and
         emitted with ``fin=True`` because the H3 driver's
         ``take_response_frames`` finalizes the response when
-        the handler returns (we don't chunk responses across
-        packets in this commit -- v0.9's flow-controlled
-        chunker lands in a follow-up).
+        the handler returns (responses are not chunked across
+        packets).
         """
         var slot_prefix = String(slot) + ":"
         var emitted = False
@@ -1718,8 +1796,7 @@ struct QuicListener(Movable):
         # peer sent in its first Initial's DCID). RFC 9000
         # §17.2.2: the Initial Source Connection ID is the
         # server's chosen CID -- here we echo local_cid so the
-        # client's CID->slot routing stays stable (per-Initial
-        # SCID rotation is a v0.9+ follow-up).
+        # client's CID->slot routing stays stable.
         var first_bits = (pn_length - 1) & 0x3
         var prefix = encode_long_header(
             PACKET_TYPE_INITIAL,
@@ -1756,7 +1833,7 @@ struct QuicListener(Movable):
         self.connections[slot] = conn^
         return datagram^
 
-    # -- Phase F commit 4/6 -- Handshake + 1-RTT egress via rustls ----------
+    # -- Handshake + 1-RTT egress via rustls --------------------------------
 
     def _build_handshake_response(
         mut self, slot: Int, pn_length: Int = 2
@@ -1947,8 +2024,7 @@ struct QuicListener(Movable):
                 + String(pn_length)
             )
         # 1. Build the unprotected short-header prefix.
-        # spin_bit + key_phase stay 0 in this commit -- v0.9
-        # adds key-update + spin-bit honesty.
+        # spin_bit + key_phase stay 0 (no key-update yet).
         var prefix = encode_short_header(
             conn.peer_cid,
             spin_bit=False,
@@ -2102,7 +2178,7 @@ struct QuicListener(Movable):
         """Run the listener's event loop. Blocks until
         :meth:`shutdown` flips the stop flag.
 
-        Per Track Q11-W the loop now drives the full I/O cycle
+        The loop drives the full I/O cycle
         ``recv -> dispatch -> drain -> protect -> sendto ->
         advance_timers``:
 

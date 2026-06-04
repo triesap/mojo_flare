@@ -590,18 +590,12 @@ struct HttpServer(Movable):
         :class:`Response` is encoded into the slot's H3 outbox
         via :meth:`QuicListener.emit_h3_response`, and the
         outbound bytes accumulate in the per-(slot, stream_id)
-        egress buffer (Track Q12-W).
+        egress buffer.
 
         Returns the number of (slot, stream) pairs dispatched
-        this pass. Zero when no H3 request is ready. The QUIC
-        STREAM frame egress + 1-RTT protection wiring that puts
-        :attr:`QuicListener.h3_response_egress` on the wire is
-        gated on the rustls key-change bridge that surfaces
-        1-RTT traffic secrets (deferred follow-up); this pump
-        already exercises the full
-        ``take_completed_streams -> Handler -> emit_response ->
-        take_response_frames`` chain so the dispatch is
-        verifiable end-to-end via unit tests today.
+        this pass. Zero when no H3 request is ready. The buffered
+        bytes leave the wire via the 1-RTT STREAM egress drain
+        once the slot's 1-RTT keys are installed.
 
         Raises:
             Error: If no h3 listener is bound.
@@ -625,9 +619,8 @@ struct HttpServer(Movable):
         """Run the QUIC reactor with H3 handler dispatch as a
         single-threaded loop.
 
-        Per Track Q12-W this is the H3-aware blocking entry
-        point: each iteration runs
-        :meth:`QuicListener.tick` to drain one inbound UDP
+        This is the H3-aware blocking entry point: each iteration
+        runs :meth:`QuicListener.tick` to drain one inbound UDP
         datagram + drive the QUIC + rustls state machines, then
         :meth:`pump_h3_handler_once` to dispatch any completed
         H3 request streams through ``handler``, then
@@ -637,11 +630,9 @@ struct HttpServer(Movable):
         (:meth:`QuicListener.shutdown`).
 
         The serve-loop pairs the TCP unified reactor (the
-        canonical :meth:`serve` overloads above) -- they are
-        peer entry points; production callers running both
-        wires should spawn one OS thread for each loop until
-        the single-thread multiplex via shared epoll lands
-        (v0.8 follow-up; see ``criticism.mdc``).
+        canonical :meth:`serve` overloads above) as a peer entry
+        point; callers running both wires spawn one OS thread per
+        loop.
 
         Raises:
             Error: If no h3 listener is bound.
@@ -659,6 +650,10 @@ struct HttpServer(Movable):
                 _ = listener.tick(timeout_ms=100)
                 var h_copy = handler.copy()
                 _ = self._pump_listener_h3[H](listener, h_copy^)
+                # Flush H3 responses the handler just queued so they
+                # leave on this loop turn rather than waiting for the
+                # next inbound datagram to trigger a per-slot drain.
+                _ = listener.drain_all_egress()
                 var now_ms = _quic_monotonic_ms()
                 _ = listener.advance_timers(now_ms)
         except e:
@@ -1122,15 +1117,15 @@ struct HttpServer(Movable):
     ](mut self, var handler: CH,) raises:
         """Run the cancel-aware reactor loop with a ``CancelHandler``.
 
-        Single-threaded entry point; the multicore variant lands in a
-        future commit. The reactor allocates one ``CancelCell`` per
-        connection, hands a ``Cancel`` handle bound to it into
-        ``handler.serve(req, cancel)``, and flips the cell on:
+        Single-threaded entry point. The reactor allocates one
+        ``CancelCell`` per connection, hands a ``Cancel`` handle bound
+        to it into ``handler.serve(req, cancel)``, and flips the cell
+        on:
 
-        - ``CancelReason.PEER_CLOSED`` — peer FIN observed before the
+        - ``CancelReason.PEER_CLOSED`` -- peer FIN observed before the
           response was queued.
-        - ``CancelReason.TIMEOUT`` — wired in a later commit.
-        - ``CancelReason.SHUTDOWN`` — wired in a later commit.
+        - ``CancelReason.TIMEOUT`` -- idle-timeout driven.
+        - ``CancelReason.SHUTDOWN`` -- listener stop requested.
 
         For plain ``Handler``s that don't observe cancellation, wrap
         with ``WithCancel[H](inner=h)`` to plug them into this entry
