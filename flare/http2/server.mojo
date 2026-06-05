@@ -506,7 +506,17 @@ struct H2Connection(Defaultable, Movable):
             # eagerly inside ``items()`` so this loop never aliases the
             # slab's owned storage.
             var s = entry[1].copy()
-            if s.headers_complete and s.data_complete:
+            # Skip streams already dispatched: ``emit_response`` moves a
+            # served stream to ``CLOSED``, but ``headers_complete`` /
+            # ``data_complete`` stay set. Without this guard a second
+            # ``on_readable`` (e.g. an EAGAIN re-pump on macOS loopback,
+            # or any later readable event in the live reactor) would
+            # re-return the same id and double-dispatch the handler.
+            if (
+                s.headers_complete
+                and s.data_complete
+                and s.state.value != StreamState.CLOSED().value
+            ):
                 ids.append(s.id)
         return ids^
 
