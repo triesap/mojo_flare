@@ -1450,10 +1450,23 @@ reading at HEAD ``b9aeeef`` (source data:
 |---|---:|---:|---:|---:|---|
 | quiche 0.22 (boringssl-vendored) | 72,571 | (per-stream) | (per-stream) | (per-stream) | clean: 0 errors / 0 timeouts across 5 runs, sigma ~1% |
 | quinn 0.11 + h3 0.0.8        | 654    | 4.17     | 4.75       | 5.48        | open-loop 100-stream shape errors 98% (1.2M errored of 1.2M total) -- this is workload-shape calibration, not a quinn ceiling (the 10s warmup with the same client sustained 104k req/s at 0 errors) |
-| flare h3                     | 351    | 506.86   | 674.46     | 674.50      | Phase F closed the inbound post-Initial decrypt path (rustls KeyChange -> per-level keys, Handshake + 1-RTT AEAD/HP decrypt, ACK packet-number-space split): the handshake completes and h2load sustains a stable 351 req/s (sigma 3.19%, p50 255 ms) at 1 client x 100 streams. The gate (>= 72,571) is NOT met. The egress path emits one UDP datagram per H3 response with no packet coalescing and no sendmmsg/GSO, and each packet is built byte-by-byte with two FFI crossings (AEAD + header protection). Single-stream (`-c1 -m1`) runs at 2,145 req/s with 105 us RTT, so the fast path is healthy; the deficit is egress-bound under concurrency. Closing the gate is the egress-coalescing + sendmmsg/GSO milestone tracked in `design-0.8.mdc`. |
+| **flare h3**                 | **74,653** | **1.45** | **2.45**   | 433.45      | Gate MET: beats quiche's 72,571 by +2.9% at sigma 0.50% (stable across 5x30s runs). The Phase F reactor rewrite removed the per-packet/per-op whole-state deep copies (in-place `ref` mutation of the `connections` / `h3_connections` slabs), routed QPACK decode through the cached-table SIMD Huffman path + a build-once static table + slice-based literal decode, and reserved capacity on the hot `List[UInt8]` egress builders so the per-datagram assembly fills one allocation instead of growing byte-by-byte. The last lever mattered most: the allocator's thread-local cache lives in a dlopen'd lib, so every spared malloc/free also spares a slow dynamic-TLS lookup, which collapsed both the `List._realloc` and `__tls_get_addr` profile peaks. p99.9 fell from 410 ms (Phase F first pass) to 2.45 ms; the lone p99.99 outlier (433 ms) is a per-run connection-setup artifact, not a steady-state stall. Egress was already coalesced (ACK + flow-control + multiple H3 STREAM frames per 1-RTT datagram); `recvmmsg`/`sendmmsg`/GSO were left unbuilt because the gate closed without them. |
 
 Reading order:
 
+- **flare h3** now leads the table at 74,653 req/s -- a +2.9%
+  margin over quiche at a tighter 0.50% run-sigma. The gate
+  (`flare_h3 median >= 72,571 req/s, sigma <= 8%`) is MET. The
+  win came from the reactor rewrite, not from new syscall
+  batching: eliminating per-packet whole-connection / whole-H3
+  deep copies, a cached-table QPACK decode path, and reserving
+  the hot egress buffers so each datagram is assembled in one
+  allocation. Because the Mojo allocator's per-thread cache is
+  reached through a dlopen'd library's dynamic-TLS slot, cutting
+  allocation volume also cut the `__tls_get_addr` /
+  `_dl_update_slotinfo` overhead that dominated the profile, so
+  the allocation fix paid off twice. p99/p99.9 are 1.45/2.45 ms;
+  the single 433 ms p99.99 reading is a per-run setup artifact.
 - **quiche** is the steady-state H3 reference at this workload
   shape: 72.5k req/s with 1% run-σ and zero errored streams.
 - **quinn**'s headline 654 req/s number reflects the harness
@@ -1464,25 +1477,35 @@ Reading order:
   exposed the per-conn limit; the calibration knob lives in
   ``benchmark/configs/h3_throughput.yaml`` (``h2load_streams``
   + ``h2load_duration_seconds``).
-- **flare h3** at 351 req/s reflects the post-Phase-F state: the
-  inbound post-Initial decrypt path is live (rustls KeyChange ->
-  per-level keys, Handshake + 1-RTT AEAD/HP decrypt), the
-  packet-number-space split removed the optimistic-ACK
-  PROTOCOL_VIOLATION the client raised, and the handshake now
-  completes and stays stable across the full 5x30s run. The
-  remaining gap to the 72,571 req/s gate is egress, not the
-  handshake: every H3 response leaves as its own UDP datagram
-  (no coalescing), each built byte-by-byte with an AEAD + a
-  header-protection FFI crossing, and there is no sendmmsg/GSO
-  batching. The single-stream path is healthy (2,145 req/s,
-  105 us RTT); throughput collapses only under the 100-stream
-  concurrency the gate measures. Closing it is the egress
-  coalescing + sendmmsg/GSO milestone tracked in `design-0.8.mdc`.
+- **flare h3** at 74,653 req/s reflects the post-Phase-F reactor
+  rewrite. The inbound post-Initial decrypt path was already live
+  after Phase F's first pass (rustls KeyChange -> per-level keys,
+  Handshake + 1-RTT AEAD/HP decrypt, packet-number-space split);
+  the first pass measured only 351 req/s because per-inbound-packet
+  and per-egress-op work deep-copied the whole `QuicConnection` /
+  `H3Connection` slab entry (each holds a `Dict` of every open
+  stream), making 100 concurrent streams quadratic. The rewrite
+  bound a mutable `ref` into the slab slot and mutated in place,
+  routed QPACK decode through the cached-table SIMD Huffman path +
+  a build-once static table + a slice-based literal decoder, and
+  reserved capacity on the hot `List[UInt8]` egress builders. The
+  allocation reduction was the decisive lever: the Mojo allocator's
+  per-thread cache is reached through a dlopen'd library's dynamic
+  TLS, so every malloc/free spared also spared a slow
+  `__tls_get_addr` -> `_dl_update_slotinfo` walk -- the two profile
+  peaks fell together. Egress coalescing (ACK + flow-control +
+  multiple H3 STREAM frames packed per 1-RTT datagram, MTU-bounded)
+  was already in place; the gate closed without needing the
+  pre-authorized `recvmmsg`/`sendmmsg`/GSO batching, so that work
+  was left unbuilt. UDP `SO_RCVBUF`/`SO_SNDBUF` setters + the
+  `FLARE_QUIC_RCVBUF` / `FLARE_QUIC_SNDBUF` env knobs were added but
+  default off: raising the receive buffer on this single-reactor
+  loopback shape added queuing delay (bufferbloat) that hurt both
+  throughput and the tail, so the kernel default is kept.
 
-When the egress milestone lands, ``pixi run -e bench bench-h3 all``
-re-runs this table without further script edits; the floor-hold
-row in "Best-perf refresh at HEAD" gains a matching HTTP/3 entry
-at that point.
+``pixi run -e bench bench-h3 all`` re-runs this table without
+further script edits; the floor-hold row in "Best-perf refresh at
+HEAD" gains a matching HTTP/3 entry at the next dev-box sweep.
 
 ``bench_h3.sh`` exits 0 with a clear banner when h2load with
 H3 support isn't on ``PATH`` (older dev-boxes / CI runners), so
