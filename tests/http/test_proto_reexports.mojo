@@ -74,6 +74,7 @@ from flare.http.proto import (
     H2StreamState,
     _ExperimentalH1LeniencyConfig,
     ascii_unchecked_string,
+    ascii_eq_ignore_case,
 )
 
 
@@ -253,6 +254,25 @@ def test_ascii_unchecked_string_reexport() raises:
     assert_equal(ascii_unchecked_string(Span[UInt8, _](List[UInt8]())), "")
 
 
+def test_ascii_eq_ignore_case() raises:
+    # Allocation-free case-insensitive ASCII compare used on the
+    # parser hot path in place of ``k.lower() == "literal"``.
+    assert_true(ascii_eq_ignore_case("Content-Length", "content-length"))
+    assert_true(ascii_eq_ignore_case("CONTENT-LENGTH", "content-length"))
+    assert_true(ascii_eq_ignore_case("content-length", "content-length"))
+    assert_true(ascii_eq_ignore_case("CoNtEnT-LeNgTh", "content-length"))
+    # Length mismatch short-circuits.
+    assert_true(not ascii_eq_ignore_case("content-lengt", "content-length"))
+    assert_true(not ascii_eq_ignore_case("content-length ", "content-length"))
+    # Different name.
+    assert_true(not ascii_eq_ignore_case("Content-Type", "content-length"))
+    # Empty vs empty.
+    assert_true(ascii_eq_ignore_case("", ""))
+    assert_true(not ascii_eq_ignore_case("x", ""))
+    # Only ASCII upper-case letters fold; punctuation/digits are literal.
+    assert_true(ascii_eq_ignore_case("Transfer-Encoding", "transfer-encoding"))
+
+
 def main() raises:
     test_cookie_roundtrip()
     test_form_urlencoded()
@@ -267,4 +287,5 @@ def main() raises:
     test_simd_memmem_smoke()
     test_h1_leniency_default_is_strict()
     test_ascii_unchecked_string_reexport()
+    test_ascii_eq_ignore_case()
     print("test_proto_reexports: OK")

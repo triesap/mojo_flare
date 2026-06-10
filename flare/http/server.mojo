@@ -23,7 +23,7 @@ from .intern import intern_method_bytes
 from .request import Request, Method
 from .response import Response, Status
 from .headers import HeaderMap
-from .proto.ascii import ascii_unchecked_string
+from .proto.ascii import ascii_unchecked_string, ascii_eq_ignore_case
 from .proto.h1_leniency import H1LeniencyConfig
 from .static_response import StaticResponse
 from .alpn_dispatch import (
@@ -1716,7 +1716,7 @@ def _parse_http_request_bytes(
         # smuggling vectors unless every value agrees. Strict
         # treats the second occurrence as malformed; the leniency
         # flag accepts when the values match.
-        if k.lower() == "content-length":
+        if ascii_eq_ignore_case(k, "content-length"):
             var n = _parse_int_str(v)
             if content_length_seen >= 0 and n != content_length_seen:
                 raise Error(

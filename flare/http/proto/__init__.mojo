@@ -191,7 +191,11 @@ from flare.http.proto.h1_leniency import (
 # reactor-coupled ``flare.http.server`` to the sans-I/O parser
 # layer because every consumer (H1 message parser, H2 wire codec,
 # HPACK, gRPC metadata) is parser-shaped.
-from flare.http.proto.ascii import ascii_lower, ascii_unchecked_string
+from flare.http.proto.ascii import (
+    ascii_lower,
+    ascii_unchecked_string,
+    ascii_eq_ignore_case,
+)
 
 # RFC 7540 §3.2 ``Upgrade: h2c`` detector. Pure predicate over a
 # parsed ``HeaderMap`` -- no reactor / socket / TLS coupling.
