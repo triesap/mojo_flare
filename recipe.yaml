@@ -1,9 +1,8 @@
 # rattler-build recipe for flare
-# Distributes flare and its inlined json dependency as their *source* trees
-# under $PREFIX/lib/mojo/ rather than as pre-compiled .mojopkg artifacts —
-# same shape as ehsanmok/sqlite. Consumers' Mojo resolves
-# ``from flare.http import ...`` and the transitive ``from json import ...``
-# directly from these source files at their own compile time.
+# Distributes flare as a source tree under $PREFIX/lib/mojo/ rather than as a
+# pre-compiled .mojopkg artifact. Consumers' Mojo resolves
+# ``from flare.http import ...`` directly from these source files at their own
+# compile time.
 #
 # Why source-level distribution rather than ``mojo package``:
 #   1. A ``.mojopkg`` produced by ``mojo package`` embeds the compiler
@@ -15,17 +14,12 @@
 #   2. ``mojo package`` also adds an extra Mojo run during the recipe
 #      build, which a stale build cache or a pre-release Mojo nightly
 #      can break in ways unrelated to flare's own source.
-# Source distribution sidesteps both: the .conda has zero ABI-locked
-# binary content from Mojo, only the source files plus the C++ FFI .so's.
+# Source distribution sidesteps both: the .conda has zero ABI-locked binary
+# content from Mojo, only the source files plus flare's C++ FFI .so's.
 # The ``run: mojo == ...`` pin in the requirements still tells solvers
 # which compiler to use — the difference is the lock now lives where
 # it's easy to update (a one-line bump in this recipe), not embedded in
 # a binary blob.
-#
-# json source is inlined at the v0.1.5 git tag (whose own recipe pins
-# the same Mojo nightly) until json publishes to a public conda channel;
-# at that point the inline ``json`` source step + the ``cp -r json-src/json``
-# can be replaced with a ``host: [json]`` requirement.
 
 context:
   name: flare
@@ -36,22 +30,15 @@ package:
   version: ${{ version }}
 
 source:
-  # flare source
-  - path: .
-  # json source (inlined; v0.1.5's recipe pins the same Mojo nightly we
-  # ship against, see ``ehsanmok/json@v0.1.5/recipe.yaml``).
-  - git: https://github.com/ehsanmok/json.git
-    target_directory: json-src
-    tag: v0.1.5
+  path: .
 
 build:
   script:
     - mkdir -p $PREFIX/lib/mojo
-    # ── Source trees (flare + json) staged under $PREFIX/lib/mojo/ ───────
+    # ── Source tree staged under $PREFIX/lib/mojo/ ───────────────────────
     # Mojo discovers these the same way it discovers .mojopkg files in
     # that directory; no ``mojo package`` step required.
     - cp -r flare $PREFIX/lib/mojo/
-    - cp -r json-src/json $PREFIX/lib/mojo/
     # ── flare: OpenSSL TLS FFI wrapper ───────────────────────────────────
     - $CXX -O2 -std=c++17 -fPIC -DNDEBUG -shared
         -o $PREFIX/lib/libflare_tls.so
@@ -60,27 +47,18 @@ build:
         -L$PREFIX/lib
         -lssl -lcrypto
         -Wl,-rpath,$PREFIX/lib
-    # ── json: simdjson FFI wrapper (loaded at runtime by json) ───────────
-    - $CXX -O3 -std=c++17 -fPIC -DNDEBUG -shared
-        -o $PREFIX/lib/libsimdjson_wrapper.so
-        json-src/json/cpu/simdjson_ffi/simdjson_wrapper.cpp
-        -I$PREFIX/include
-        -L$PREFIX/lib
-        -lsimdjson
 
 requirements:
   build:
     - ${{ compiler('cxx') }}
-    - git   # needed to clone json source
   host:
     - openssl >=3.0,<4
     - ca-certificates
-    - simdjson >=4.2.4,<5    # json's simdjson FFI wrapper
   run:
     - mojo ==1.0.0b1
+    - json >=0.2.0,<0.3.0
     - openssl >=3.0,<4
     - ca-certificates
-    - simdjson >=4.2.4,<5    # libsimdjson_wrapper.so is loaded at runtime
 
 about:
   homepage: https://github.com/ehsanmok/flare
